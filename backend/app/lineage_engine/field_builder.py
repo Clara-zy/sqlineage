@@ -92,6 +92,9 @@ def build_alias(node: exp.Alias, ctx: BuildContext) -> str:
     h = compute_hash(expression)
     ctx.upsert_field(h, "expression", expression)
     ctx.upsert_field_reference(inner_h, h)
+    # 枚举继承
+    from app.field_enums import inherit_enum
+    inherit_enum(inner_h, h)
     return h
 
 
@@ -441,6 +444,8 @@ def build_column(node: exp.Column, ctx: BuildContext) -> str:
         expression = {"op": "column", "table": full_table, "column": col_name}
         base_hash = compute_hash(expression)
         ctx.upsert_field(base_hash, "atomic", expression)
+        # 枚举值：从 column_comment 解析 ENUM(...)
+        _maybe_parse_enum(table_rec["id"], col_name, base_hash)
     elif table_rec["source"] == "middle":
         tc = ctx.get_table_column_by_name(table_rec["id"], col_name)
         if not tc or not tc["field_hash"]:
@@ -522,7 +527,27 @@ def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
     ctx.upsert_field(join_h, "expression", join_expr)
     ctx.upsert_field_reference(inner_hash, join_h)
     ctx.upsert_field_reference(on_hash, join_h)
+    # 枚举继承
+    from app.field_enums import inherit_enum
+    inherit_enum(inner_hash, join_h)
     return join_h
+
+
+def _maybe_parse_enum(table_id: int, column_name: str, field_hash: str):
+    """从 table_columns.comment 解析 ENUM(...) 并写入 field_enums"""
+    from app.database import get_cursor
+    from app.field_enums import parse_enum_from_comment, upsert_field_enum
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT column_comment FROM table_columns "
+            "WHERE table_id = %s AND column_name = %s",
+            (table_id, column_name),
+        )
+        row = cur.fetchone()
+    if row and row["column_comment"]:
+        values = parse_enum_from_comment(row["column_comment"])
+        if values:
+            upsert_field_enum(field_hash, values, "ddl_comment")
 
 
 def _resolve_subquery_column(alias: str, col_name: str, ctx: BuildContext) -> str:

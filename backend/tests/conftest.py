@@ -17,6 +17,7 @@ def cleanup_lineage():
         cur.execute("DELETE FROM table_column_mappings")
         cur.execute("DELETE FROM table_input_subqueries")
         cur.execute("DELETE FROM natural_semantics")
+        cur.execute("DELETE FROM field_enums")
         cur.execute("DELETE FROM subqueries")
         cur.execute("DELETE FROM fields")
         # 清除 table_columns 上的冗余 field_hash 指针，避免指向已删除的 fields

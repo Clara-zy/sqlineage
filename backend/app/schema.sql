@@ -174,7 +174,23 @@ CREATE TABLE IF NOT EXISTS natural_semantics (
 CREATE INDEX IF NOT EXISTS idx_ns_citizen ON natural_semantics(citizen_hash, citizen_type);
 
 -- ============================================================
--- 8. 默认管理员
+-- 8. 字段枚举值
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS field_enums (
+    id                  SERIAL PRIMARY KEY,
+    field_hash          VARCHAR(16) NOT NULL,
+    enum_values         JSONB NOT NULL,
+    source              VARCHAR(32) NOT NULL DEFAULT 'ddl_comment',
+    status              tracking_status NOT NULL DEFAULT 'active',
+    deprecated_at       TIMESTAMPTZ,
+    deprecated_reason   TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_fe_hash_status ON field_enums(field_hash, status);
+
+-- ============================================================
+-- 9. 默认管理员
 -- ============================================================
 
 -- 密码 nbkknb 的 bcrypt hash
