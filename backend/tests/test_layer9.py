@@ -92,6 +92,49 @@ class TestDateFunctions:
             assert cur.fetchone() is not None
 
 
+class TestRightJoin:
+    """RIGHT JOIN → LEFT JOIN 转换"""
+
+    def test_right_join_converts_to_left(self, clean_db):
+        """RIGHT JOIN 应转换为 LEFT JOIN（交换表位置）"""
+        result = build_lineage("""
+            SELECT a.trans_id, b.mchnt_nm
+            FROM trans_flow a
+            RIGHT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd
+        """)
+        assert result["new_fields"] > 0
+
+        with get_cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+            )
+            join_count = cur.fetchone()["count"]
+            # RIGHT→LEFT 后，右表是 trans_flow，应该有 JOIN 包装
+            assert join_count >= 1
+
+
+class TestThreeTableJoin:
+    """3 表连续 JOIN 的字段包装"""
+
+    def test_three_left_join_fields_wrapped(self, clean_db):
+        """3 表 LEFT JOIN: 第 2、3 个表的字段应有 JOIN 包装"""
+        result = build_lineage("""
+            SELECT a.trans_id, b.mchnt_nm, c.industry_nm
+            FROM trans_flow a
+            LEFT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd
+            LEFT JOIN dim_industry c ON b.industry_id = c.industry_id
+        """)
+        assert result["new_fields"] > 0
+
+        with get_cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+            )
+            join_count = cur.fetchone()["count"]
+            # b.mchnt_nm 和 c.industry_nm 都应该有 JOIN 包装
+            assert join_count >= 2, f"至少 2 个 JOIN，实际 {join_count}"
+
+
 class TestLateralView:
     """Q13: LATERAL VIEW"""
 

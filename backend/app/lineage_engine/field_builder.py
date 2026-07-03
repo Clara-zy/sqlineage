@@ -235,6 +235,11 @@ def build_expression(node: exp.Expression, ctx: BuildContext) -> str:
     ctx.upsert_field(h, field_type, expression)
     for ch in child_hashes:
         ctx.upsert_field_reference(ch, h)
+
+    # 枚举校验
+    if op in ("eq", "neq", "in", "notin") and len(child_hashes) >= 2:
+        _validate_enum_in_condition(child_hashes, op)
+
     return h
 
 
@@ -531,6 +536,36 @@ def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
     from app.field_enums import inherit_enum
     inherit_enum(inner_hash, join_h)
     return join_h
+
+
+def _validate_enum_in_condition(child_hashes: list[str], op: str):
+    """校验 eq/neq/in/notin 中枚举字段与字面量的匹配"""
+    from app.database import get_cursor
+    from app.field_enums import get_active_enum
+
+    left_h = child_hashes[0]  # 字段/表达式
+    right_hashes = child_hashes[1:]  # 字面量
+
+    enum_values = get_active_enum(left_h)
+    if not enum_values:
+        return
+
+    with get_cursor() as cur:
+        for rh in right_hashes:
+            cur.execute(
+                "SELECT expression FROM fields WHERE hash = %s AND field_type = 'literal'",
+                (rh,),
+            )
+            row = cur.fetchone()
+            if not row:
+                continue
+            expr = row["expression"]
+            lit_val = str(expr.get("value", ""))
+            if lit_val and lit_val not in enum_values:
+                print(
+                    f"[ENUM-WARN] 字段 {left_h[:8]} 枚举值 {enum_values} "
+                    f"不包含字面量 '{lit_val}' (op={op})"
+                )
 
 
 def _maybe_parse_enum(table_id: int, column_name: str, field_hash: str):

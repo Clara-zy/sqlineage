@@ -105,3 +105,29 @@ class TestEnumValidate:
         warn = validate_enum_value(h, "PENDING")
         assert warn is not None
         assert "PENDING" in warn
+
+    def test_eq_with_enum_warns_on_build(self, clean_db):
+        """WHERE trans_status = 'PENDING' 构建时产生枚举警告"""
+        import io, sys
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            build_lineage("SELECT trans_id FROM trans_flow WHERE trans_status = 'PENDING'")
+        finally:
+            sys.stdout = old_stdout
+        output = captured.getvalue()
+        assert "ENUM-WARN" in output, f"应有枚举警告, 实际: {output}"
+
+    def test_eq_with_valid_enum_no_warn(self, clean_db):
+        """WHERE trans_status = 'SUCCESS' 不产生警告"""
+        import io, sys
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            build_lineage("SELECT trans_id FROM trans_flow WHERE trans_status = 'SUCCESS'")
+        finally:
+            sys.stdout = old_stdout
+        output = captured.getvalue()
+        assert "ENUM-WARN" not in output

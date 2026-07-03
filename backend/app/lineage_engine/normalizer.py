@@ -26,10 +26,12 @@ def build_schema_dict() -> dict:
 
 
 def normalize(sql: str, schema: dict) -> sqlglot.Expression:
-    """对 SQL 做标准化：FULL JOIN → UNION / qualify → dnf → simplify"""
+    """对 SQL 做标准化：RIGHT/FULL JOIN → LEFT/UNION / qualify → dnf → simplify"""
     ast = sqlglot.parse_one(sql)
 
-    # FULL JOIN 拆解（在 qualify 之前，避免别名冲突）
+    # RIGHT JOIN → LEFT JOIN（交换 FROM 和 JOIN 表）
+    ast = _transform_right_joins(ast)
+    # FULL JOIN → (LEFT JOIN) UNION (LEFT JOIN)
     ast = _transform_full_joins(ast)
 
     if schema:
@@ -37,6 +39,33 @@ def normalize(sql: str, schema: dict) -> sqlglot.Expression:
     ast = norm_pass(ast, dnf=True)
     ast = simplify(ast)
 
+    return ast
+
+
+def _transform_right_joins(ast: sqlglot.Expression) -> sqlglot.Expression:
+    """将 RIGHT JOIN 转换为 LEFT JOIN（交换 FROM 和 JOIN）"""
+    import sqlglot.expressions as exp
+
+    if not isinstance(ast, exp.Select):
+        return ast
+
+    joins = ast.args.get("joins")
+    if not joins:
+        return ast
+
+    new_joins = []
+    for j in joins:
+        side = (j.args.get("side") or "").upper()
+        if side == "RIGHT":
+            # 交换: FROM A RIGHT JOIN B ON cond → FROM B LEFT JOIN A ON cond
+            old_from = ast.args["from"].this
+            ast.set("from", exp.From(this=j.this.copy()))
+            new_join = exp.Join(this=old_from.copy(), side="LEFT", on=j.args.get("on"))
+            new_joins.append(new_join)
+        else:
+            new_joins.append(j)
+
+    ast.set("joins", new_joins)
     return ast
 
 
