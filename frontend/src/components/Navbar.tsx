@@ -8,6 +8,7 @@ export default function Navbar() {
 
   const links = [
     { to: '/', label: '血缘工作台' },
+    { to: '/databases', label: '数据库' },
     { to: '/tables', label: '表结构' },
     { to: '/nodes', label: '节点搜索' },
   ]

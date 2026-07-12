@@ -38,7 +38,7 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     if node.args.get("where"):
         where_hash = build_field(node.args["where"], ctx)
 
-    structure = {"type": "select", "fields": field_hashes}
+    structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
     if where_hash:
         structure["where"] = where_hash
 

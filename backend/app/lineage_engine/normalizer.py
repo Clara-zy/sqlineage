@@ -6,13 +6,41 @@ from sqlglot.optimizer.normalize import normalize as norm_pass
 from sqlglot.optimizer.simplify import simplify
 
 
+def _infer_view_columns(table_id: int, cur) -> dict:
+    """从 VIEW 的子查询 projection 推断列名"""
+    import json
+    cur.execute("SELECT input_subquery_hash FROM tables WHERE id = %s", (table_id,))
+    row = cur.fetchone()
+    if not row or not row["input_subquery_hash"]:
+        return {}
+    cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (row["input_subquery_hash"],))
+    sq_row = cur.fetchone()
+    if not sq_row:
+        return {}
+    structure = sq_row["structure"]
+    columns = {}
+    for fh in structure.get("fields", []):
+        cur.execute("SELECT expression FROM fields WHERE hash = %s", (fh,))
+        fr = cur.fetchone()
+        if fr:
+            expr = fr["expression"]
+            if isinstance(expr, str):
+                expr = json.loads(expr)
+            name = expr.get("alias_name") or expr.get("column", fh[:8])
+            columns[name] = "STRING"
+    return columns
+
+
 def build_schema_dict() -> dict:
     """从 tables + table_columns 构建 sqlglot 的 schema dict"""
     from app.database import get_cursor
 
     schema = {}
     with get_cursor() as cur:
-        cur.execute("SELECT id, schema_name, table_name FROM tables")
+        cur.execute(
+            "SELECT t.id, d.name AS db_name, t.table_name, t.source FROM tables t "
+            "JOIN databases d ON d.id = t.database_id"
+        )
         tables = cur.fetchall()
         for t in tables:
             key = t["table_name"]
@@ -21,7 +49,13 @@ def build_schema_dict() -> dict:
                 (t["id"],),
             )
             columns = {r["column_name"]: r["column_type"] for r in cur.fetchall()}
-            schema[key] = columns
+            if columns:
+                schema[key] = columns
+            elif t.get("source") == "view":
+                # VIEW: 从子查询 projection 推断列名（用于 qualify）
+                view_cols = _infer_view_columns(t["id"], cur)
+                if view_cols:
+                    schema[key] = view_cols
     return schema
 
 

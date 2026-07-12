@@ -22,7 +22,7 @@ def cleanup_lineage():
         cur.execute("DELETE FROM fields")
         # 清除 table_columns 上的冗余 field_hash 指针，避免指向已删除的 fields
         cur.execute("UPDATE table_columns SET field_hash = NULL, updated_at = now()")
-        cur.execute("UPDATE tables SET input_subquery_hash = NULL, updated_at = now()")
+        cur.execute("UPDATE tables SET input_subquery_hash = NULL, updated_at = now() WHERE source != 'view'")
 
 
 @pytest.fixture(scope="function")

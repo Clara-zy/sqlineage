@@ -5,6 +5,7 @@ import TableListPage from './pages/TableListPage'
 import TableDetailPage from './pages/TableDetailPage'
 import NodeSearchPage from './pages/NodeSearchPage'
 import NodeDetailPage from './pages/NodeDetailPage'
+import DatabasePage from './pages/DatabasePage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminStatsPage from './pages/AdminStatsPage'
 import Navbar from './components/Navbar'
@@ -28,6 +29,7 @@ function App() {
             <Route path="/tables/:id" element={<TableDetailPage />} />
             <Route path="/nodes" element={<NodeSearchPage />} />
             <Route path="/nodes/:hash" element={<NodeDetailPage />} />
+            <Route path="/databases" element={<DatabasePage />} />
             <Route path="/admin/users" element={<AdminUsersPage />} />
             <Route path="/admin/stats" element={<AdminStatsPage />} />
           </Routes>

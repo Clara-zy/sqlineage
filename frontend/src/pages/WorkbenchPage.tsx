@@ -91,10 +91,15 @@ export default function WorkbenchPage() {
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [sql, setSql] = useState('')
   const [sinkTable, setSinkTable] = useState('')
+  const [comment, setComment] = useState('')
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [selectedHash, setSelectedHash] = useState<string | null>(null)
   const [nodeDetail, setNodeDetail] = useState<any>(null)
+  const [history, setHistory] = useState<any[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [showHistory, setShowHistory] = useState(false)
+  const [detailQuery, setDetailQuery] = useState<any>(null)
 
   const apiHeaders = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -102,8 +107,12 @@ export default function WorkbenchPage() {
   )
 
   /* ── 加载图谱 + elkjs 布局 ── */
-  const loadGraph = useCallback(async () => {
-    const res = await fetch('/api/v1/lineage/graph', { headers: apiHeaders })
+  const loadGraph = useCallback(async (ids?: number[]) => {
+    let url = '/api/v1/lineage/graph'
+    if (ids && ids.length > 0) {
+      url += '?query_ids=' + ids.join(',')
+    }
+    const res = await fetch(url, { headers: apiHeaders })
     const json = await res.json()
     if (json.code === 0 && json.data.nodes.length > 0) {
       const laidOut = await autoLayout(json.data.nodes, json.data.edges)
@@ -115,7 +124,31 @@ export default function WorkbenchPage() {
     }
   }, [apiHeaders, setNodes, setEdges])
 
-  useEffect(() => { loadGraph() }, [])
+  /* ── 加载历史 ── */
+  const loadHistory = useCallback(async () => {
+    const res = await fetch('/api/v1/lineage/history', { headers: apiHeaders })
+    const json = await res.json()
+    if (json.code === 0) setHistory(json.data.items)
+    setShowHistory(true)
+  }, [apiHeaders])
+
+  /* ── 勾选切换 ── */
+  const toggleQuery = useCallback((id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      // 自动刷新图谱
+      setTimeout(() => {
+        const arr = Array.from(next)
+        loadGraph(arr.length > 0 ? arr : undefined)
+      }, 50)
+      return next
+    })
+  }, [loadGraph])
+
+  // 初始不加载 —— 用户需构建查询或勾选历史来展示图谱
+  // useEffect(() => { loadGraph() }, [])
 
   /* ── 构建血缘 ── */
   const handleBuild = useCallback(async () => {
@@ -126,12 +159,21 @@ export default function WorkbenchPage() {
       const res = await fetch('/api/v1/lineage/build', {
         method: 'POST',
         headers: apiHeaders,
-        body: JSON.stringify({ sql, sink_table: sinkTable || null }),
+        body: JSON.stringify({ sql, sink_table: sinkTable || null, comment: comment || null }),
       })
       const json = await res.json()
       if (json.code === 0) {
         setStatus(`构建完成: +${json.data.new_fields} 字段, +${json.data.new_subqueries} 子查询`)
-        await loadGraph()
+        // 只展示当前查询的图谱
+        const newId = json.data.history_id
+        if (newId) {
+          setSelectedIds(new Set([newId]))
+          await loadGraph([newId])
+        }
+        // 刷新历史列表
+        const hres = await fetch('/api/v1/lineage/history', { headers: apiHeaders })
+        const hjson = await hres.json()
+        if (hjson.code === 0) setHistory(hjson.data.items)
       } else {
         setError(json.message)
         setStatus('error')
@@ -153,14 +195,14 @@ export default function WorkbenchPage() {
     [apiHeaders]
   )
 
-  /* ── 清空 ── */
-  const handleClear = useCallback(async () => {
-    await fetch('/api/v1/lineage/clear', { method: 'POST', headers: apiHeaders })
+  /* ── 清空选中 ── */
+  const handleClear = useCallback(() => {
+    setSelectedIds(new Set())
     setNodes([])
     setEdges([])
     setStatus('')
     setError('')
-  }, [apiHeaders, setNodes, setEdges])
+  }, [setNodes, setEdges])
 
   return (
     <div className="h-[calc(100vh-52px)] w-full flex flex-col">
@@ -173,6 +215,12 @@ export default function WorkbenchPage() {
           value={sql}
           onChange={(e) => setSql(e.target.value)}
           rows={2}
+        />
+        <input
+          className="w-28 border rounded px-2 py-1 text-xs"
+          placeholder="备注(可选)"
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
         />
         <input
           className="w-40 border rounded px-2 py-1 text-xs"
@@ -194,12 +242,81 @@ export default function WorkbenchPage() {
           刷新
         </button>
         <button
-          onClick={handleClear}
-          className="text-xs px-3 py-1.5 rounded border hover:bg-red-50 text-red-600 whitespace-nowrap"
+          onClick={loadHistory}
+          className="text-xs px-3 py-1.5 rounded border hover:bg-gray-50 whitespace-nowrap"
         >
-          清空
+          历史
+        </button>
+        <button
+          onClick={handleClear}
+          className="text-xs px-3 py-1.5 rounded border hover:bg-gray-50 whitespace-nowrap"
+        >
+          取消全选
         </button>
       </div>
+
+      {/* 历史面板 */}
+      {showHistory && (
+        <div className="fixed right-0 top-14 bottom-0 w-72 bg-white border-l shadow-lg z-40 overflow-auto">
+          <div className="flex items-center justify-between px-3 py-2 border-b sticky top-0 bg-white">
+            <span className="font-medium text-sm">查询历史</span>
+            <button onClick={() => setShowHistory(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+          </div>
+          <div className="p-2 space-y-1">
+            {history.map((h: any) => (
+              <label key={h.id} className="flex items-start gap-2 text-xs p-2 rounded hover:bg-gray-50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(h.id)}
+                  onChange={() => toggleQuery(h.id)}
+                  className="mt-0.5"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-gray-700 truncate">
+                    {h.comment || h.sql_text?.slice(0, 50)}
+                  </div>
+                  {h.comment && (
+                    <div className="font-mono text-gray-400 truncate text-xs">{h.sql_text?.slice(0, 50)}</div>
+                  )}
+                  <div className="text-gray-400 text-xs">
+                    +{h.field_count}字段 +{h.sq_count}SQ
+                    <span className="ml-2">{h.created_at?.slice(0, 16)}</span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDetailQuery(h) }}
+                      className="ml-2 text-blue-500 hover:underline"
+                    >
+                      详情
+                    </button>
+                  </div>
+                </div>
+              </label>
+            ))}
+            {history.length === 0 && (
+              <div className="text-xs text-gray-400 p-2">暂无构建记录</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 查询详情弹窗 */}
+      {detailQuery && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setDetailQuery(null)}>
+          <div className="bg-white rounded-lg p-4 w-[500px] max-h-[80vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-medium text-sm">
+                {detailQuery.comment || '查询详情'}
+              </h3>
+              <button onClick={() => setDetailQuery(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <div className="text-xs text-gray-500 mb-2">
+              ID: {detailQuery.id} &nbsp; +{detailQuery.field_count}字段 +{detailQuery.sq_count}SQ &nbsp; {detailQuery.created_at}
+            </div>
+            <pre className="bg-gray-50 rounded p-3 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-96">
+              {detailQuery.sql_text}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {/* 状态栏 */}
       {status && (

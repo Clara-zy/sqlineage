@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import auth, users, tables, lineage
+from app.api import auth, users, tables, lineage, databases
 
 app = FastAPI(
     title="SQLineage",
@@ -24,6 +24,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(databases.router)
 app.include_router(tables.router)
 app.include_router(lineage.router)
 

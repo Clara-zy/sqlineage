@@ -1,9 +1,11 @@
-"""种子数据 — 灌入 7 张测试表的元数据
+"""种子数据 — 灌入数据库 + 测试表的元数据
 
-运行: make db-init (已包含) 或单独: python backend/app/seed.py
+运行: make db-init (已包含)
 """
 
 from app.database import get_cursor
+
+DB_NAME = "mydb"
 
 ROOT_TABLES = {
     "trans_flow": {
@@ -67,6 +69,31 @@ ROOT_TABLES = {
     },
 }
 
+UPGRADE_TEST_TABLES = {
+    "ods_raw_trans": {
+        "table_type": "事实表",
+        "columns": [
+            ("trans_id", "STRING", "交易流水号"),
+            ("mchnt_cd", "STRING", "商户号"),
+            ("usr_id", "STRING", "用户ID"),
+            ("trans_at", "DECIMAL(18,2)", "交易金额(元)"),
+            ("trans_time", "STRING", "交易时间"),
+            ("trans_status", "STRING", "交易状态 ENUM(SUCCESS,FAIL,REFUND)"),
+            ("region_cd", "STRING", "区划代码"),
+        ],
+    },
+    "dwd_trans_mid": {
+        "table_type": "中间表",
+        "columns": [
+            ("trans_id", "STRING", "交易流水号"),
+            ("mchnt_cd", "STRING", "商户号"),
+            ("trans_at", "DECIMAL(18,2)", "交易金额"),
+            ("trans_time", "STRING", "交易时间"),
+            ("trans_status", "STRING", "交易状态 ENUM(SUCCESS,FAIL,REFUND)"),
+        ],
+    },
+}
+
 MIDDLE_TABLES = {
     "dws_mchnt_day": {
         "table_type": "汇总表",
@@ -84,53 +111,47 @@ MIDDLE_TABLES = {
 def seed():
     """灌入种子数据（幂等）"""
     with get_cursor() as cur:
+        # 数据库
+        cur.execute(
+            "INSERT INTO databases (name, description) VALUES (%s, '默认数据库') "
+            "ON CONFLICT (name) DO NOTHING RETURNING id",
+            (DB_NAME,),
+        )
+        row = cur.fetchone()
+        db_id = row["id"] if row else _get_db_id(cur, DB_NAME)
+
         for name, info in ROOT_TABLES.items():
-            # upsert tables
-            cur.execute(
-                "INSERT INTO tables (schema_name, table_name, table_type, source) "
-                "VALUES ('', %s, %s, 'root') "
-                "ON CONFLICT (schema_name, table_name) DO UPDATE SET source = 'root' "
-                "RETURNING id",
-                (name, info["table_type"]),
-            )
-            table_id = cur.fetchone()["id"]
-
-            # upsert columns
-            for i, (col_name, col_type, col_comment) in enumerate(info["columns"], 1):
-                cur.execute(
-                    "INSERT INTO table_columns "
-                    "(table_id, column_name, column_type, column_comment, ordinal_position) "
-                    "VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (table_id, column_name) DO UPDATE "
-                    "SET column_type = %s, column_comment = %s, ordinal_position = %s",
-                    (table_id, col_name, col_type, col_comment, i,
-                     col_type, col_comment, i),
-                )
-
-        # middle 表
+            _upsert_table(cur, db_id, name, info, "root")
         for name, info in MIDDLE_TABLES.items():
-            cur.execute(
-                "INSERT INTO tables (schema_name, table_name, table_type, source) "
-                "VALUES ('', %s, %s, 'middle') "
-                "ON CONFLICT (schema_name, table_name) DO UPDATE SET source = 'middle' "
-                "RETURNING id",
-                (name, info["table_type"]),
-            )
-            table_id = cur.fetchone()["id"]
+            _upsert_table(cur, db_id, name, info, "sink")
+        for name, info in UPGRADE_TEST_TABLES.items():
+            _upsert_table(cur, db_id, name, info, "root")
 
-            for i, (col_name, col_type, col_comment) in enumerate(info["columns"], 1):
-                cur.execute(
-                    "INSERT INTO table_columns "
-                    "(table_id, column_name, column_type, column_comment, ordinal_position) "
-                    "VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (table_id, column_name) DO UPDATE "
-                    "SET column_type = %s, column_comment = %s, ordinal_position = %s",
-                    (table_id, col_name, col_type, col_comment, i,
-                     col_type, col_comment, i),
-                )
-
-    print(f"✓ 种子数据就绪 — {len(ROOT_TABLES)} root 表 + {len(MIDDLE_TABLES)} middle 表")
+    print(f"✓ 种子数据就绪 — {DB_NAME}: {len(ROOT_TABLES)} root + {len(MIDDLE_TABLES)} middle + {len(UPGRADE_TEST_TABLES)} 升级测试表")
 
 
-if __name__ == "__main__":
-    seed()
+def _get_db_id(cur, name: str) -> int:
+    cur.execute("SELECT id FROM databases WHERE name = %s", (name,))
+    return cur.fetchone()["id"]
+
+
+def _upsert_table(cur, db_id: int, name: str, info: dict, source: str):
+    cur.execute(
+        "INSERT INTO tables (database_id, table_name, table_type, source) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (database_id, table_name) DO UPDATE SET source = %s "
+        "RETURNING id",
+        (db_id, name, info["table_type"], source, source),
+    )
+    table_id = cur.fetchone()["id"]
+
+    for i, (col_name, col_type, col_comment) in enumerate(info["columns"], 1):
+        cur.execute(
+            "INSERT INTO table_columns "
+            "(table_id, column_name, column_type, column_comment, ordinal_position) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (table_id, column_name) DO UPDATE "
+            "SET column_type = %s, column_comment = %s, ordinal_position = %s",
+            (table_id, col_name, col_type, col_comment, i,
+             col_type, col_comment, i),
+        )

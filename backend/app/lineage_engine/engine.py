@@ -16,7 +16,7 @@ from app.lineage_engine.field_builder import build_field, build_alias_map
 from app.lineage_engine.subquery_builder import build_subquery_select
 
 
-def build_lineage(sql: str, sink_table: str | None = None) -> dict:
+def build_lineage(sql: str, sink_table: str | None = None, comment: str | None = None) -> dict:
     """完整血缘构建流程"""
     # Phase 0: 入参校验
     validate_no_limit(sql)
@@ -67,12 +67,23 @@ def build_lineage(sql: str, sink_table: str | None = None) -> dict:
     if sink_table:
         sink_result = _bind_sink_table(sink_table, select_ast, sq_hash, ctx)
 
-    return {
+    result = {
         "new_fields": fields_after - fields_before,
         "new_subqueries": sq_after - sq_before,
         "reused_nodes": fields_before + sq_before,
         "sink_binding": sink_result,
     }
+
+    # 记录构建历史
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO build_history (sql_text, comment, subquery_hash, field_count, sq_count) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (sql[:500], comment, sq_hash, result["new_fields"], result["new_subqueries"]),
+        )
+        result["history_id"] = cur.fetchone()["id"]
+
+    return result
 
 
 def _build_ctes(ast, ctx):
@@ -92,7 +103,7 @@ def _build_ctes(ast, ctx):
 
 
 def _bind_sink_table(sink_ref: str, select_ast, sq_hash: str, ctx: BuildContext) -> dict:
-    """Phase 5: 绑定输出表"""
+    """Phase 5: 绑定输出表 + 自动级联（存量 middle 表 sink 变更时触发）"""
     parts = sink_ref.split(".", 1)
     schema_name = parts[0] if len(parts) == 2 else ""
     table_name = parts[-1]
@@ -109,21 +120,38 @@ def _bind_sink_table(sink_ref: str, select_ast, sq_hash: str, ctx: BuildContext)
             f"子查询投影列数({projection_count})与表结构列数({len(tc_list)})不一致",
         )
 
+    # 捕获旧映射（用于级联判断）
+    old_hashes = [tc["field_hash"] for tc in tc_list if tc["field_hash"]]
+
+    # 废弃旧 + 写新
     mappings = []
     ctx.deprecate_active_input_subquery(table["id"], "新血缘构建")
     ctx.insert_input_subquery(table["id"], sq_hash)
     ctx.update_table_input_subquery(table["id"], sq_hash)
 
+    new_hashes = []
     for i, expr in enumerate(select_ast.expressions):
         tc = tc_list[i]
         field_h = build_field(expr, ctx)
         ctx.deprecate_active_mappings(tc["id"], "新血缘构建")
         ctx.insert_column_mapping(tc["id"], field_h)
         ctx.update_table_column_field_hash(tc["id"], field_h)
+        new_hashes.append(field_h)
         mappings.append({
             "ordinal_position": tc["ordinal_position"],
             "column_name": tc["column_name"],
             "field_hash": field_h,
         })
+
+    # 存量 middle 表 → 触发下游级联
+    if old_hashes and any(old_hashes):
+        old_to_new = {}
+        for oh, nh in zip(old_hashes, new_hashes):
+            if oh and nh and oh != nh:
+                old_to_new[oh] = nh
+
+        if old_to_new:
+            from app.upgrade_engine.engine import cascade_from_sink
+            cascade_from_sink(old_to_new, table_name)
 
     return {"input_subquery": sq_hash, "column_mappings": mappings}

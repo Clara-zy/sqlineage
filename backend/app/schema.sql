@@ -28,25 +28,42 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
 -- ============================================================
--- 2. 表结构
+-- 2. 数据库定义
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS databases (
+    id          SERIAL PRIMARY KEY,
+    name        VARCHAR(128) UNIQUE NOT NULL,
+    description VARCHAR(256),
+    note        TEXT,
+    created_by  INT REFERENCES users(id),
+    updated_by  INT REFERENCES users(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ
+);
+
+-- ============================================================
+-- 3. 表结构
 -- ============================================================
 
 DO $$ BEGIN
-    CREATE TYPE table_source AS ENUM ('root', 'middle');
+    CREATE TYPE table_source AS ENUM ('root', 'sink', 'view');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 CREATE TABLE IF NOT EXISTS tables (
     id                  SERIAL PRIMARY KEY,
-    schema_name         VARCHAR(128) NOT NULL,
+    database_id         INT REFERENCES databases(id),
     table_name          VARCHAR(128) NOT NULL,
     logical_name        VARCHAR(256),
     table_type          VARCHAR(64) NOT NULL,
     source              table_source NOT NULL,
     input_subquery_hash VARCHAR(16),
+    created_by          INT REFERENCES users(id),
+    updated_by          INT REFERENCES users(id),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ,
-    UNIQUE (schema_name, table_name)
+    UNIQUE (database_id, table_name)
 );
 CREATE INDEX IF NOT EXISTS idx_tables_source ON tables(source);
 
@@ -174,7 +191,27 @@ CREATE TABLE IF NOT EXISTS natural_semantics (
 CREATE INDEX IF NOT EXISTS idx_ns_citizen ON natural_semantics(citizen_hash, citizen_type);
 
 -- ============================================================
--- 8. 字段枚举值
+-- 8. 构建历史
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS build_history (
+    id              SERIAL PRIMARY KEY,
+    sql_text        TEXT NOT NULL,
+    comment         VARCHAR(200),
+    subquery_hash   VARCHAR(16),
+    field_count     INT NOT NULL DEFAULT 0,
+    sq_count        INT NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 为已有 build_history 表加 comment 列（兼容旧表）
+DO $$ BEGIN
+    ALTER TABLE build_history ADD COLUMN IF NOT EXISTS comment VARCHAR(200);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- ============================================================
+-- 9. 字段枚举值
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS field_enums (

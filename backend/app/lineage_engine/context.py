@@ -24,18 +24,22 @@ class BuildContext:
 
     # ── 表结构查询 ──
 
-    def get_table(self, schema_name: str, table_name: str) -> dict | None:
+    def get_table(self, db_name: str, table_name: str) -> dict | None:
         with get_cursor() as cur:
-            if schema_name:
+            if db_name:
                 cur.execute(
-                    "SELECT id, schema_name, table_name, source FROM tables "
-                    "WHERE schema_name = %s AND table_name = %s",
-                    (schema_name, table_name),
+                    "SELECT t.id, d.name AS db_name, t.table_name, t.source, "
+                    "t.input_subquery_hash "
+                    "FROM tables t JOIN databases d ON d.id = t.database_id "
+                    "WHERE d.name = %s AND t.table_name = %s",
+                    (db_name, table_name),
                 )
             else:
                 cur.execute(
-                    "SELECT id, schema_name, table_name, source FROM tables "
-                    "WHERE table_name = %s",
+                    "SELECT t.id, d.name AS db_name, t.table_name, t.source, "
+                    "t.input_subquery_hash "
+                    "FROM tables t JOIN databases d ON d.id = t.database_id "
+                    "WHERE t.table_name = %s",
                     (table_name,),
                 )
             row = cur.fetchone()
@@ -98,12 +102,21 @@ class BuildContext:
 
     # ── 表-字段映射 ──
 
-    def update_table_column_field_hash(self, column_id: int, field_hash: str):
+    def update_table_column_field_hash(self, column_id_or_table_id: int, field_hash_or_col_name: str, hash_override: str | None = None):
         with get_cursor() as cur:
-            cur.execute(
-                "UPDATE table_columns SET field_hash = %s, updated_at = now() WHERE id = %s",
-                (field_hash, column_id),
-            )
+            if hash_override is not None:
+                # 新签名: (table_id, column_name, field_hash)
+                cur.execute(
+                    "UPDATE table_columns SET field_hash = %s, updated_at = now() "
+                    "WHERE table_id = %s AND column_name = %s",
+                    (hash_override, column_id_or_table_id, field_hash_or_col_name),
+                )
+            else:
+                # 旧签名: (column_id, field_hash)
+                cur.execute(
+                    "UPDATE table_columns SET field_hash = %s, updated_at = now() WHERE id = %s",
+                    (field_hash_or_col_name, column_id_or_table_id),
+                )
 
     # ── 追踪表操作 ──
 

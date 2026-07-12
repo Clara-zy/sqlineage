@@ -14,12 +14,13 @@ router = APIRouter(prefix="/api/v1/lineage", tags=["lineage"])
 class BuildRequest(BaseModel):
     sql: str
     sink_table: str | None = None
+    comment: str | None = None
 
 
 @router.post("/build")
 def build(req: BuildRequest, user: dict = Depends(get_current_user)):
     try:
-        result = build_lineage(req.sql, req.sink_table)
+        result = build_lineage(req.sql, req.sink_table, req.comment)
         return {"code": 0, "data": result, "message": "ok"}
     except ValidationError as e:
         return {"code": e.code, "data": None, "message": e.message}
@@ -27,32 +28,113 @@ def build(req: BuildRequest, user: dict = Depends(get_current_user)):
         return {"code": 500, "data": None, "message": str(e)}
 
 
-@router.get("/graph")
-def graph(user: dict = Depends(get_current_user)):
-    """返回当前所有字段节点 + 引用边，供前端 ReactFlow 渲染"""
+@router.get("/history")
+def history(user: dict = Depends(get_current_user)):
     with get_cursor() as cur:
         cur.execute(
-            "SELECT hash, field_type, expression FROM fields ORDER BY created_at"
+            "SELECT id, sql_text, comment, subquery_hash, field_count, sq_count, created_at "
+            "FROM build_history ORDER BY id DESC LIMIT 20"
         )
-        field_rows = [dict(r) for r in cur.fetchall()]
+        items = [dict(r) for r in cur.fetchall()]
+    return {"code": 0, "data": {"items": items}, "message": "ok"}
 
-        cur.execute(
-            "SELECT referenced_hash AS source, referrer_hash AS target "
-            "FROM field_references"
-        )
-        edge_rows = [dict(r) for r in cur.fetchall()]
 
-    # 转为 ReactFlow 格式
+@router.get("/graph")
+def graph(
+    query_ids: str | None = None,
+    user: dict = Depends(get_current_user),
+):
+    """返回字段节点 + 引用边。query_ids 可选过滤（逗号分隔的 build_history id）。"""
+    with get_cursor() as cur:
+        if query_ids:
+            ids = [int(x) for x in query_ids.split(",") if x.strip().isdigit()]
+            if ids:
+                # 找到这些查询的顶层子查询 hash
+                placeholders = ",".join(["%s"] * len(ids))
+                cur.execute(
+                    f"SELECT subquery_hash FROM build_history WHERE id IN ({placeholders})",
+                    ids,
+                )
+                sq_hashes = [r["subquery_hash"] for r in cur.fetchall()]
+
+                if not sq_hashes:
+                    return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
+
+                # 从子查询的 structure.fields 出发，BFS 收集所有可达字段
+                sq_placeholders = ",".join(["%s"] * len(sq_hashes))
+                cur.execute(
+                    f"SELECT structure FROM subqueries WHERE hash IN ({sq_placeholders})",
+                    sq_hashes,
+                )
+                sq_structures = [r["structure"] for r in cur.fetchall()]
+
+                # 收集所有可达的 field hash
+                reachable = set()
+                queue = []
+                for struct in sq_structures:
+                    for fh in struct.get("fields", []):
+                        reachable.add(fh)
+                        queue.append(fh)
+                    wh = struct.get("where")
+                    if wh:
+                        reachable.add(wh)
+                        queue.append(wh)
+
+                # BFS
+                while queue:
+                    fh = queue.pop(0)
+                    cur.execute(
+                        "SELECT referenced_hash FROM field_references WHERE referrer_hash = %s",
+                        (fh,),
+                    )
+                    for row in cur.fetchall():
+                        ref = row["referenced_hash"]
+                        if ref not in reachable:
+                            reachable.add(ref)
+                            queue.append(ref)
+
+                # 过滤节点和边
+                if reachable:
+                    ph = ",".join(["%s"] * len(reachable))
+                    cur.execute(
+                        f"SELECT hash, field_type, expression FROM fields WHERE hash IN ({ph})",
+                        list(reachable),
+                    )
+                    field_rows = [dict(r) for r in cur.fetchall()]
+
+                    cur.execute(
+                        f"SELECT referenced_hash AS source, referrer_hash AS target "
+                        f"FROM field_references "
+                        f"WHERE referenced_hash IN ({ph}) AND referrer_hash IN ({ph})",
+                        list(reachable) * 2,
+                    )
+                    edge_rows = [dict(r) for r in cur.fetchall()]
+                else:
+                    field_rows = []
+                    edge_rows = []
+            else:
+                field_rows = []
+                edge_rows = []
+        else:
+            cur.execute(
+                "SELECT hash, field_type, expression FROM fields ORDER BY created_at"
+            )
+            field_rows = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT referenced_hash AS source, referrer_hash AS target "
+                "FROM field_references"
+            )
+            edge_rows = [dict(r) for r in cur.fetchall()]
+
+    # 序列化 nodes / edges
     nodes = []
     for i, f in enumerate(field_rows):
         expr = f["expression"]
         if isinstance(expr, str):
             import json
             expr = json.loads(expr)
-
         op = expr.get("op", "?")
         label = _node_label(f["field_type"], expr)
-
         nodes.append({
             "id": f["hash"],
             "type": "fieldNode",
@@ -139,6 +221,46 @@ def node_detail(hash: str, user: dict = Depends(get_current_user)):
         },
         "message": "ok",
     }
+
+
+@router.get("/upgrade/preview/{table_name}")
+def upgrade_preview(
+    table_name: str,
+    user: dict = Depends(get_current_user),
+):
+    """预览升级影响"""
+    if user["role"] != "admin":
+        return {"code": 403, "data": None, "message": "仅管理员可操作"}
+
+    from app.upgrade_engine.engine import preview_upgrade
+    result = preview_upgrade(table_name)
+    if "error" in result:
+        return {"code": 500, "data": None, "message": result["error"]}
+    return {"code": 0, "data": result, "message": "ok"}
+
+
+@router.post("/upgrade/execute")
+def upgrade_execute(
+    req: dict,
+    user: dict = Depends(get_current_user),
+):
+    """执行升级"""
+    if user["role"] != "admin":
+        return {"code": 403, "data": None, "message": "仅管理员可操作"}
+
+    table_name = req.get("table_name")
+    extended_sql = req.get("extended_sql")
+    if not table_name or not extended_sql:
+        return {"code": 400, "data": None, "message": "缺少参数"}
+
+    from app.upgrade_engine.engine import execute_upgrade
+    try:
+        result = execute_upgrade(table_name, extended_sql)
+        if "error" in result:
+            return {"code": 500, "data": None, "message": result["error"]}
+        return {"code": 0, "data": result, "message": "ok"}
+    except Exception as e:
+        return {"code": 500, "data": None, "message": str(e)}
 
 
 @router.post("/clear")

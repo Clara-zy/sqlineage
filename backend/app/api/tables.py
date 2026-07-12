@@ -22,6 +22,7 @@ def list_tables(
     page_size: int = 20,
     user: dict = Depends(get_current_user),
 ):
+    page_size = min(max(page_size, 1), 100)
     with get_cursor() as cur:
         conditions = []
         params = []
@@ -30,20 +31,28 @@ def list_tables(
             params.append(source)
         if keyword:
             conditions.append(
-                "(t.table_name ILIKE %s OR t.schema_name ILIKE %s OR t.logical_name ILIKE %s)"
+                "(t.table_name ILIKE %s OR d.name ILIKE %s OR t.logical_name ILIKE %s)"
             )
             kw = f"%{keyword}%"
             params.extend([kw, kw, kw])
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        cur.execute(f"SELECT count(*) FROM tables t WHERE {where}", params)
+        cur.execute(
+            f"SELECT count(*) FROM tables t JOIN databases d ON d.id = t.database_id WHERE {where}",
+            params,
+        )
         total = cur.fetchone()["count"]
 
         cur.execute(
-            f"SELECT t.id, t.schema_name, t.table_name, t.table_type, t.source, t.logical_name, "
+            f"SELECT t.id, d.name AS db_name, t.table_name, t.table_type, t.source, t.logical_name, "
             f"(SELECT count(*) FROM table_columns tc WHERE tc.table_id = t.id) AS col_count, "
-            f"t.created_at "
-            f"FROM tables t WHERE {where} ORDER BY t.id LIMIT %s OFFSET %s",
+            f"t.created_at, t.updated_at, "
+            f"cu.username AS created_by_name, uu.username AS updated_by_name "
+            f"FROM tables t "
+            f"JOIN databases d ON d.id = t.database_id "
+            f"LEFT JOIN users cu ON cu.id = t.created_by "
+            f"LEFT JOIN users uu ON uu.id = t.updated_by "
+            f"WHERE {where} ORDER BY t.id LIMIT %s OFFSET %s",
             params + [page_size, (page - 1) * page_size],
         )
         items = [dict(r) for r in cur.fetchall()]
@@ -150,8 +159,9 @@ def create_table(
 def get_table(table_id: int, user: dict = Depends(get_current_user)):
     with get_cursor() as cur:
         cur.execute(
-            "SELECT id, schema_name, table_name, table_type, source, "
-            "logical_name, input_subquery_hash, created_at FROM tables WHERE id = %s",
+            "SELECT t.id, d.name AS db_name, t.table_name, t.table_type, t.source, "
+            "t.logical_name, t.input_subquery_hash, t.created_at "
+            "FROM tables t JOIN databases d ON d.id = t.database_id WHERE t.id = %s",
             (table_id,),
         )
         row = cur.fetchone()
@@ -182,6 +192,45 @@ def input_history(table_id: int, user: dict = Depends(get_current_user)):
     return {"code": 0, "data": {"items": items}, "message": "ok"}
 
 
+@router.get("/{table_id}/preview-delete")
+def preview_delete_table(table_id: int, user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT t.table_name, d.name AS db_name, "
+            "(SELECT count(*) FROM fields f JOIN table_columns tc ON tc.field_hash = f.hash WHERE tc.table_id = t.id) AS field_count "
+            "FROM tables t JOIN databases d ON d.id = t.database_id WHERE t.id = %s",
+            (table_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404)
+        return {"code": 0, "data": dict(row), "message": "ok"}
+
+
+@router.delete("/{table_id}")
+def delete_table(table_id: int, user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
+    with get_cursor() as cur:
+        cur.execute("DELETE FROM table_columns WHERE table_id = %s", (table_id,))
+        cur.execute("DELETE FROM table_input_subqueries WHERE table_id = %s", (table_id,))
+        cur.execute("DELETE FROM table_column_mappings WHERE table_column_id IN (SELECT id FROM table_columns WHERE table_id = %s)", (table_id,))
+        cur.execute("DELETE FROM tables WHERE id = %s", (table_id,))
+    return {"code": 0, "data": None, "message": "ok"}
+
+
+@router.post("/{table_id}/downgrade")
+def downgrade_to_root(table_id: int, user: dict = Depends(get_current_user)):
+    """sink → root 降级"""
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
+    with get_cursor() as cur:
+        cur.execute("UPDATE tables SET source = 'root', input_subquery_hash = NULL WHERE id = %s AND source = 'sink'", (table_id,))
+    return {"code": 0, "data": None, "message": "ok"}
+
+
 @router.get("/{table_id}/columns/{col_id}/mapping-history")
 def mapping_history(
     table_id: int, col_id: int, user: dict = Depends(get_current_user)
@@ -202,14 +251,27 @@ def _parse_ddl(ddl: str) -> dict | None:
 
     # CREATE TABLE [schema.]table_name (...)
     m = re.search(
-        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w]+\.)?(\w+)\s*\((.+)\)",
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\.(\w+)\s*\((.+)\)",
         ddl, re.IGNORECASE | re.DOTALL,
     )
     if not m:
+        # 兼容旧格式（无库名）
+        m = re.search(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\((.+)\)",
+            ddl, re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            db_name = "mydb"
+            table_name = m.group(1)
+            body = m.group(2)
+        else:
+            return None
+    else:
+        db_name = m.group(1)
+        table_name = m.group(2)
+        body = m.group(3)
+    if not m and not table_name:
         return None
-
-    table_name = m.group(1)
-    body = m.group(2)
 
     columns = []
     # 简易列解析: col_name col_type [COMMENT '...']

@@ -435,12 +435,12 @@ def build_column(node: exp.Column, ctx: BuildContext) -> str:
         table_name = resolved
 
     db_ident = node.args.get("db")
-    schema_name = ""
+    db_name = ""
     if db_ident:
-        schema_name = db_ident if isinstance(db_ident, str) else db_ident.name
-    full_table = f"{schema_name}.{table_name}" if schema_name else table_name
+        db_name = db_ident if isinstance(db_ident, str) else db_ident.name
+    full_table = f"{db_name}.{table_name}" if db_name else table_name
 
-    table_rec = ctx.get_table(schema_name or "", table_name)
+    table_rec = ctx.get_table(db_name or "", table_name)
     if not table_rec:
         raise MissingLineageData(f"表 {full_table} 不存在")
 
@@ -451,11 +451,15 @@ def build_column(node: exp.Column, ctx: BuildContext) -> str:
         ctx.upsert_field(base_hash, "atomic", expression)
         # 枚举值：从 column_comment 解析 ENUM(...)
         _maybe_parse_enum(table_rec["id"], col_name, base_hash)
-    elif table_rec["source"] == "middle":
+        # 回填 table_columns.field_hash
+        ctx.update_table_column_field_hash(table_rec["id"], col_name, base_hash)
+    elif table_rec["source"] == "sink":
         tc = ctx.get_table_column_by_name(table_rec["id"], col_name)
         if not tc or not tc["field_hash"]:
-            raise MissingLineageData(f"middle 表 {full_table}.{col_name} 缺少血缘数据")
+            raise MissingLineageData(f"sink 表 {full_table}.{col_name} 缺少血缘数据")
         base_hash = tc["field_hash"]
+    elif table_rec["source"] == "view":
+        base_hash = _resolve_view_column(table_rec, col_name, full_table)
     else:
         raise MissingLineageData(f"未知的表来源: {table_rec['source']}")
 
@@ -620,3 +624,30 @@ def _resolve_lateral_column(alias: str, col_name: str, ctx: BuildContext) -> str
     ctx.upsert_field(h, "expression", expression)
     ctx.upsert_field_reference(inner_h, h)
     return h
+
+
+def _resolve_view_column(table_rec: dict, col_name: str, full_table: str) -> str:
+    from app.database import get_cursor
+    sq_hash = table_rec.get("input_subquery_hash")
+    if not sq_hash:
+        raise MissingLineageData(f"VIEW {full_table} 缺少子查询定义")
+    with get_cursor() as cur:
+        cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_hash,))
+        row = cur.fetchone()
+        if not row:
+            raise MissingLineageData(f"VIEW {full_table} 子查询不存在")
+        structure = row["structure"]
+        # 优先用 alias_map
+        alias_map = structure.get("alias_map", {})
+        if col_name in alias_map:
+            return alias_map[col_name]
+        # 兜底：遍历 fields
+        for fh in structure.get("fields", []):
+            cur.execute("SELECT expression FROM fields WHERE hash = %s", (fh,))
+            fr = cur.fetchone()
+            if fr:
+                expr = fr["expression"]
+                if (expr.get("op") == "alias" and expr.get("alias_name") == col_name) or \
+                   (expr.get("op") == "column" and expr.get("column") == col_name):
+                    return fh
+    raise MissingLineageData(f"VIEW {full_table} 中未找到列 {col_name}")
