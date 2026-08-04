@@ -11,7 +11,7 @@ class TestLayer5:
     def test_and_or_condition(self, clean_db):
         """复合 AND + OR 条件"""
         result = build_lineage("""
-            SELECT count(*) AS cnt
+            SELECT sum(trans_at) as trans_at, count(*) AS cnt
             FROM trans_flow
             WHERE trans_status = 'SUCCESS'
               AND (trans_at > 500 OR mchnt_cd = 'M001')

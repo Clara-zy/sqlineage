@@ -3,7 +3,6 @@
 import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
-from app.lineage_engine.validators import ValidationError
 
 
 class TestJoinWrap:
@@ -56,16 +55,45 @@ class TestJoinWrap:
 class TestValidation:
     """违规校验"""
 
-    def test_three_inner_join_rejected(self, clean_db):
-        """Q15: 3表 INNER JOIN 应拒绝"""
-        with pytest.raises(ValidationError) as exc:
-            build_lineage("""
-                SELECT a.trans_id, b.mchnt_nm, c.industry_nm
-                FROM trans_flow a
-                INNER JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd
-                INNER JOIN dim_industry c ON b.industry_id = c.industry_id
-            """)
-        assert exc.value.code == 49002
+    def test_three_inner_join_accepted(self, clean_db):
+        """3表连续 INNER JOIN：左右表字段逐层累积包裹，不再拒绝"""
+        from app.database import get_cursor
+
+        result = build_lineage("""
+            SELECT a.trans_id, b.mchnt_nm, c.industry_nm
+            FROM trans_flow a
+            INNER JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd
+            INNER JOIN dim_industry c ON b.industry_id = c.industry_id
+        """)
+
+        # 构建成功
+        assert result["new_fields"] > 0
+
+        with get_cursor() as cur:
+            # 验证 JOIN 节点存在（a 列 2 层 + b 列 2 层 + c 列 1 层 = 5，加 ON 引用 = 6）
+            cur.execute(
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+            )
+            join_count = cur.fetchone()["count"]
+            assert join_count >= 5
+
+            # 验证 a.trans_id 被包了两层 JOIN
+            cur.execute(
+                "SELECT f.hash FROM fields f "
+                "JOIN field_references fr ON fr.referrer_hash = f.hash "
+                "WHERE f.expression ->> 'op' = 'JOIN' "
+                "AND jsonb_array_length(f.expression -> 'args') = 1"
+            )
+            join_nodes = cur.fetchall()
+            assert len(join_nodes) >= 3  # 至少 3 个 JOIN 节点（a 层 1, a 层 2, b 层 1 等）
+
+            # 验证 field_references 链：atomic → JOIN1 → JOIN2（a.trans_id 路径）
+            cur.execute(
+                "SELECT count(*) FROM field_references "
+                "WHERE referenced_hash IN (SELECT hash FROM fields WHERE expression ->> 'op' = 'column')"
+            )
+            atomic_refs = cur.fetchone()["count"]
+            assert atomic_refs >= 3  # 至少 3 个原子字段被引用
 
 
 class TestDateFunctions:

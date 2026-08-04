@@ -77,27 +77,41 @@ def create_table(
     if not parsed:
         return {"code": 41002, "data": None, "message": "DDL 解析失败"}
 
+    db_name = parsed["db_name"]
     table_name = parsed["table_name"]
     columns = parsed["columns"]
 
     with get_cursor() as cur:
-        # 检查重复
+        # 查找或创建数据库
         cur.execute(
-            "SELECT id FROM tables WHERE table_name = %s",
-            (table_name,),
+            "INSERT INTO databases (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING RETURNING id",
+            (db_name,),
+        )
+        row = cur.fetchone()
+        if row:
+            db_id = row["id"]
+        else:
+            cur.execute("SELECT id FROM databases WHERE name = %s", (db_name,))
+            db_id = cur.fetchone()["id"]
+
+        # 检查重复（同库下表名唯一）
+        cur.execute(
+            "SELECT id FROM tables WHERE database_id = %s AND table_name = %s",
+            (db_id, table_name),
         )
         if cur.fetchone():
             return {
                 "code": 41001,
                 "data": None,
-                "message": f"表 {table_name} 已存在",
+                "message": f"表 {db_name}.{table_name} 已存在",
             }
 
         # 插入表
         cur.execute(
-            "INSERT INTO tables (schema_name, table_name, table_type, source) "
-            "VALUES ('', %s, '事实表', %s) RETURNING id",
-            (table_name, req.source),
+            "INSERT INTO tables (database_id, table_name, table_type, source, created_by) "
+            "VALUES (%s, %s, '事实表', %s, %s) RETURNING id",
+            (db_id, table_name, req.source, user["id"]),
         )
         table_id = cur.fetchone()["id"]
 
@@ -288,4 +302,4 @@ def _parse_ddl(ddl: str) -> dict | None:
     if not columns:
         return None
 
-    return {"table_name": table_name, "columns": columns}
+    return {"db_name": db_name, "table_name": table_name, "columns": columns}

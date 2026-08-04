@@ -33,14 +33,25 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     # 恢复 group_keys
     ctx.group_keys = saved_group_keys
 
-    # 构建 where 条件
+    # 构建 WHERE，并对每个投影列包裹 WHERE(field, condition=where_hash)
     where_hash = None
     if node.args.get("where"):
         where_hash = build_field(node.args["where"], ctx)
 
-    structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
     if where_hash:
-        structure["where"] = where_hash
+        from app.field_enums import inherit_enum
+        wrapped = []
+        for fh in field_hashes:
+            where_expr = {"op": "WHERE", "args": [{"hash": fh}], "condition": where_hash}
+            wh = compute_hash(where_expr)
+            ctx.upsert_field(wh, "expression", where_expr)
+            ctx.upsert_field_reference(fh, wh)
+            ctx.upsert_field_reference(where_hash, wh)
+            inherit_enum(fh, wh)
+            wrapped.append(wh)
+        field_hashes = wrapped
+
+    structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
 
     h = compute_hash(structure)
     ctx.upsert_subquery(h, "select", structure)

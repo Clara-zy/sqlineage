@@ -1,5 +1,3 @@
-import { useAuthStore } from '../stores/authStore'
-
 interface NodeDetail {
   hash: string
   field_type: string
@@ -11,17 +9,6 @@ interface NodeDetail {
 const TYPE_COLORS: Record<string, string> = {
   atomic: '#22c55e', literal: '#94a3b8', expression: '#3b82f6',
   atomic_condition: '#eab308', composite_condition: '#f97316',
-}
-
-function exprLabel(field_type: string, expr: any): string {
-  const op = expr?.op || '?'
-  if (op === 'column') return `${expr.table}.${expr.column}`
-  if (op === 'alias') return `AS ${expr.alias_name || '?'}`
-  if (op === 'literal') return `'${String(expr.value || '').slice(0, 12)}'`
-  if (op === 'star') return '*'
-  if (op === 'JOIN') return 'JOIN(...)'
-  if (op === 'casewhen') return 'CASE WHEN'
-  return op
 }
 
 export default function SidePanel({

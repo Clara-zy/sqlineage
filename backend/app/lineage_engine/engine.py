@@ -12,7 +12,7 @@ from app.lineage_engine.validators import (
     validate_tables_exist,
 )
 from app.lineage_engine.normalizer import build_schema_dict, normalize
-from app.lineage_engine.field_builder import build_field, build_alias_map
+from app.lineage_engine.field_builder import build_field
 from app.lineage_engine.subquery_builder import build_subquery_select
 
 
@@ -42,7 +42,6 @@ def build_lineage(sql: str, sink_table: str | None = None, comment: str | None =
 
     if isinstance(normalized_ast, exp.Select):
         select_ast = normalized_ast
-        build_alias_map(select_ast, ctx)
         sq_hash, _ = build_subquery_select(select_ast, ctx)
     elif isinstance(normalized_ast, exp.Union):
         from app.lineage_engine.subquery_builder import build_subquery_union

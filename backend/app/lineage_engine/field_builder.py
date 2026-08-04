@@ -58,6 +58,10 @@ def build_field(node: exp.Expression, ctx: BuildContext) -> str:
         result = build_star(node, ctx)
     elif isinstance(node, exp.Null):
         result = build_literal_null(node, ctx)
+    elif isinstance(node, exp.Subquery):
+        result = build_subquery(node, ctx)
+    elif isinstance(node, exp.CurrentTimestamp):
+        result = build_current_timestamp(ctx)
     elif isinstance(node, exp.Ordered):
         result = build_field(node.this, ctx)
     elif isinstance(node, exp.Distinct):
@@ -162,8 +166,16 @@ def _function_children(node: exp.Expression, ctx: BuildContext) -> list[str]:
             children.append(build_field(arg, ctx))
     elif isinstance(node, exp.Round):
         children.append(build_field(node.this, ctx))
-        if node.expression:
-            children.append(build_field(node.expression, ctx))
+        decimals = node.args.get("decimals")
+        if decimals:
+            children.append(build_field(decimals, ctx))
+    elif isinstance(node, exp.If):
+        # IIF / IF(cond, true_val, false_val)
+        children.append(build_field(node.this, ctx))
+        for key in ("true", "false"):
+            arg = node.args.get(key)
+            if arg:
+                children.append(build_field(arg, ctx))
     elif isinstance(node, (exp.RowNumber,)):
         # row_number() 无参数
         pass
@@ -306,9 +318,18 @@ def build_window(node: exp.Window, ctx: BuildContext) -> str:
 # ── 4. JOIN 包装 (INNER/RIGHT/FULL) ──
 
 def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
-    """从 SELECT 的 FROM + JOIN 子句提取 alias → table_name 映射 + 子查询"""
+    """从 SELECT 的 FROM + JOIN 子句提取 alias → table_name 映射 + 子查询
+
+    JOIN 包装采用累积模型：
+      - join_wraps[alias] = [on_hash_1, on_hash_2, ...]  按 JOIN 顺序的 ON 栈
+      - left_aliases: 当前「左侧」所有别名（INNER 合并，LEFT 不合并）
+      - all_aliases: 所有已出现别名（用于 INNER 时全体包裹）
+    """
     alias_map = ctx.alias_map
-    join_on_map = ctx.join_on_map
+    join_wraps = ctx.join_wraps
+
+    left_aliases: set[str] = set()
+    all_aliases: set[str] = set()
 
     def _reg_table(node: exp.Table):
         name = node.name
@@ -334,25 +355,24 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
             ctx.subquery_map[outer_alias] = {"sq_hash": inner_sq_hash, "ast": inner, "alias_to_hash": alias_to_hash}
             return outer_alias
 
-    def _extract_from(expr):
-        if isinstance(expr, exp.Table):
-            _reg_table(expr)
-        elif isinstance(expr, (exp.Select, exp.Subquery)):
-            _reg_subquery(expr, expr.alias)
-        elif isinstance(expr, exp.Join):
-            _extract_from(expr.this)
-            _extract_from(expr.expression)
-
-    # FROM
+    # ── FROM ──
     from_expr = select_ast.args.get("from")
     if from_expr:
-        _extract_from(from_expr.this)
-        # LEFT table key
-        left_key = None
-        if isinstance(from_expr.this, exp.Table):
-            result = _reg_table(from_expr.this)
+        from_src = from_expr.this
+        # 注册
+        if isinstance(from_src, exp.Table):
+            result = _reg_table(from_src)
             if result:
-                left_key = result[1]
+                key = result[1]
+                left_aliases.add(key)
+                all_aliases.add(key)
+                join_wraps.setdefault(key, [])
+        elif isinstance(from_src, (exp.Select, exp.Subquery)):
+            key = _reg_subquery(from_src, from_src.alias)
+            if key:
+                left_aliases.add(key)
+                all_aliases.add(key)
+                join_wraps.setdefault(key, [])
 
     # LATERAL VIEW
     for node in select_ast.walk():
@@ -362,21 +382,13 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
                 alias_map[lateral_alias] = f"__lateral__{lateral_alias}"
                 ctx.subquery_map[lateral_alias] = {"sq_hash": "__lateral__", "ast": node}
 
-    # JOINs
-    for i, join in enumerate(select_ast.args.get("joins") or []):
+    # ── JOINs ──
+    for join in (select_ast.args.get("joins") or []):
         join_table = join.this
-        join_side = (join.args.get("side") or "").upper()
         join_kind = (join.args.get("kind") or "").upper()
+        join_side = (join.args.get("side") or "").upper()
 
-        # RIGHT JOIN → 转化为 LEFT JOIN 语义（交换左右）
-        if join_side == "RIGHT":
-            join_side = "LEFT"
-            # 标记为要交换 — 简化处理：对右表做 LEFT 包装
-            # 实际上 RIGHT JOIN 应该交换 FROM 和 JOIN 的表，这里先做简化
-
-        # FULL JOIN 在入参阶段应被拒绝（需要先转为 UNION）
-
-        # 注册 JOIN 表别名
+        # 注册右表
         right_key = None
         if isinstance(join_table, exp.Table):
             result = _reg_table(join_table)
@@ -385,23 +397,31 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
         elif isinstance(join_table, (exp.Select, exp.Subquery)):
             right_key = _reg_subquery(join_table, join_table.alias)
 
+        if not right_key:
+            continue
+
         # 构建 ON
         on_node = join.args.get("on")
-        on_hash = None
-        if on_node:
-            on_hash = build_field(on_node, ctx)
+        on_hash = build_field(on_node, ctx) if on_node else None
 
-        if on_hash:
-            # INNER JOIN: 左右表都包裹
-            if join_kind == "INNER" or join_side == "INNER":
-                if left_key:
-                    join_on_map[left_key] = on_hash
-                if right_key:
-                    join_on_map[right_key] = on_hash
-            # LEFT JOIN: 只包裹右表
-            elif join_side == "LEFT" or not join_side:
-                if right_key:
-                    join_on_map[right_key] = on_hash
+        if not on_hash:
+            all_aliases.add(right_key)
+            join_wraps.setdefault(right_key, [])
+            left_aliases.add(right_key)  # 无 ON 视为 CROSS JOIN，归入左侧
+            continue
+
+        if join_kind == "INNER":
+            # INNER: 全体已有列 + 右表列都包当前 ON
+            for alias in all_aliases:
+                join_wraps.setdefault(alias, []).append(on_hash)
+            join_wraps.setdefault(right_key, []).append(on_hash)
+            left_aliases.add(right_key)
+            all_aliases.add(right_key)
+        else:
+            # LEFT (默认): 仅右表包裹，左侧不变
+            join_wraps.setdefault(right_key, []).append(on_hash)
+            all_aliases.add(right_key)
+            # left_aliases 不变
 
 
 # ── 基础函数 ──
@@ -505,6 +525,29 @@ def build_star(node: exp.Star, ctx: BuildContext) -> str:
     return h
 
 
+def build_subquery(node: exp.Subquery, ctx: BuildContext) -> str:
+    """处理表达式中的子查询 (如 WHERE x IN (SELECT ...))
+    创建包装 field 节点表示子查询结果，避免 field_references FK 约束冲突。
+    """
+    from app.lineage_engine.subquery_builder import build_subquery_select
+    inner = node.this
+    if isinstance(inner, exp.Select):
+        sq_hash, _ = build_subquery_select(inner, ctx)
+        expression = {"op": "subquery", "subquery_hash": sq_hash}
+        h = compute_hash(expression)
+        ctx.upsert_field(h, "expression", expression)
+        return h
+    raise UnsupportedExpression(f"不支持的子查询类型: {type(inner).__name__}")
+
+
+def build_current_timestamp(ctx: BuildContext) -> str:
+    """CURRENT_TIMESTAMP → 无参数内容寻址节点，全局复用"""
+    expression = {"op": "current_timestamp"}
+    h = compute_hash(expression)
+    ctx.upsert_field(h, "expression", expression)
+    return h
+
+
 def build_literal_null(node: exp.Null, ctx: BuildContext) -> str:
     expression = {"op": "literal", "value": "NULL", "type": "null"}
     h = compute_hash(expression)
@@ -527,19 +570,24 @@ def build_in(node: exp.In, ctx: BuildContext) -> str:
 
 
 def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
-    """如果 alias 在 join_on_map 中，包装为 JOIN 表达式"""
-    on_hash = ctx.join_on_map.get(alias)
-    if not on_hash or not inner_hash:
+    """按 join_wraps[alias] 栈逐层包裹 JOIN 表达式"""
+    on_hashes = ctx.join_wraps.get(alias, [])
+    if not on_hashes or not inner_hash:
         return inner_hash
-    join_expr = {"op": "JOIN", "args": [{"hash": inner_hash}], "on": on_hash}
-    join_h = compute_hash(join_expr)
-    ctx.upsert_field(join_h, "expression", join_expr)
-    ctx.upsert_field_reference(inner_hash, join_h)
-    ctx.upsert_field_reference(on_hash, join_h)
-    # 枚举继承
+
     from app.field_enums import inherit_enum
-    inherit_enum(inner_hash, join_h)
-    return join_h
+    result = inner_hash
+    for on_hash in on_hashes:
+        if not on_hash:
+            continue
+        join_expr = {"op": "JOIN", "args": [{"hash": result}], "on": on_hash}
+        new_h = compute_hash(join_expr)
+        ctx.upsert_field(new_h, "expression", join_expr)
+        ctx.upsert_field_reference(result, new_h)
+        ctx.upsert_field_reference(on_hash, new_h)
+        inherit_enum(result, new_h)
+        result = new_h
+    return result
 
 
 def _validate_enum_in_condition(child_hashes: list[str], op: str):

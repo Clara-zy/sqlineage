@@ -19,7 +19,7 @@ class BuildContext:
         self.cache: dict[str, str] = {}  # canonical_json → field_hash
         self.alias_map: dict[str, str] = {}  # 表别名 → 真实表名
         self.subquery_map: dict[str, dict] = {}  # 子查询别名 → {ast, projection_hashes}
-        self.join_on_map: dict[str, str] = {}  # 右表别名 → on 条件 hash
+        self.join_wraps: dict[str, list[str]] = {}  # 别名 → [on_hash, ...] 栈式包裹
         self.group_keys: list[str] = []  # 当前子查询的 GROUP BY 字段 hash 列表
 
     # ── 表结构查询 ──

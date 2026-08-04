@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import {
   ReactFlow,
   Background,
@@ -14,6 +14,7 @@ import '@xyflow/react/dist/style.css'
 import ELK from 'elkjs/lib/elk.bundled.js'
 import { useAuthStore } from '../stores/authStore'
 import SidePanel from '../components/SidePanel'
+import TestCasePage from './TestCasePage'
 
 /* ── 字段节点颜色 ── */
 const TYPE_COLORS: Record<string, string> = {
@@ -26,16 +27,17 @@ const TYPE_COLORS: Record<string, string> = {
 
 /* ── 自定义字段节点 ── */
 function FieldNode({ data }: NodeProps) {
-  const color = TYPE_COLORS[data.field_type] || '#6b7280'
+  const d = data as any
+  const color = TYPE_COLORS[d.field_type] || '#6b7280'
   return (
     <div
       className="rounded-lg border-2 px-3 py-2 text-xs shadow-sm bg-white min-w-[130px]"
       style={{ borderColor: color }}
     >
       <Handle type="target" position={Position.Top} />
-      <div className="font-mono text-gray-400">{data.hash}</div>
-      <div className="font-medium text-gray-800 mt-0.5">{data.label}</div>
-      <div className="text-gray-400 mt-0.5">{data.field_type}</div>
+      <div className="font-mono text-gray-400">{d.hash}</div>
+      <div className="font-medium text-gray-800 mt-0.5">{d.label}</div>
+      <div className="text-gray-400 mt-0.5">{d.field_type}</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
   )
@@ -86,15 +88,42 @@ async function autoLayout(
 
 /* ── 主页面 ── */
 export default function WorkbenchPage() {
+  const [tab, setTab] = useState<'build' | 'cases'>('cases')
+
+  return (
+    <div className="h-[calc(100vh-52px)] w-full flex flex-col">
+      {/* Tab 切换 */}
+      <div className="bg-white border-b px-4 py-1.5 flex items-center gap-1 shrink-0">
+        <button
+          onClick={() => setTab('cases')}
+          className={`text-xs px-4 py-1 rounded ${tab === 'cases' ? 'bg-green-100 text-green-700 font-medium' : 'text-gray-500 hover:bg-gray-100'}`}
+        >
+          测例浏览
+        </button>
+        <button
+          onClick={() => setTab('build')}
+          className={`text-xs px-4 py-1 rounded ${tab === 'build' ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100'}`}
+        >
+          手动构建
+        </button>
+      </div>
+
+      {tab === 'build' ? <BuildTab /> : <TestCasePage />}
+    </div>
+  )
+}
+
+/* ── 手动构建 Tab ── */
+function BuildTab() {
   const token = useAuthStore((s) => s.token)
-  const [nodes, setNodes, onNodesChange] = useNodesState([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const [nodes, setNodes, onNodesChange] = useNodesState<any>([])
+  const [edges, setEdges, onEdgesChange] = useEdgesState<any>([])
   const [sql, setSql] = useState('')
   const [sinkTable, setSinkTable] = useState('')
   const [comment, setComment] = useState('')
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
-  const [selectedHash, setSelectedHash] = useState<string | null>(null)
+  const setSelectedHash = useState<string | null>(null)[1]
   const [nodeDetail, setNodeDetail] = useState<any>(null)
   const [history, setHistory] = useState<any[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
@@ -108,10 +137,12 @@ export default function WorkbenchPage() {
 
   /* ── 加载图谱 + elkjs 布局 ── */
   const loadGraph = useCallback(async (ids?: number[]) => {
-    let url = '/api/v1/lineage/graph'
-    if (ids && ids.length > 0) {
-      url += '?query_ids=' + ids.join(',')
+    if (!ids || ids.length === 0) {
+      setNodes([])
+      setEdges([])
+      return
     }
+    const url = '/api/v1/lineage/graph?query_ids=' + ids.join(',')
     const res = await fetch(url, { headers: apiHeaders })
     const json = await res.json()
     if (json.code === 0 && json.data.nodes.length > 0) {
@@ -236,7 +267,7 @@ export default function WorkbenchPage() {
           {status === 'building' ? '构建中...' : '构建血缘'}
         </button>
         <button
-          onClick={loadGraph}
+          onClick={() => loadGraph()}
           className="text-xs px-3 py-1.5 rounded border hover:bg-gray-50 whitespace-nowrap"
         >
           刷新
@@ -340,7 +371,7 @@ export default function WorkbenchPage() {
           <Background />
           <Controls />
           <MiniMap
-            nodeColor={(n) => TYPE_COLORS[n.data?.field_type] || '#6b7280'}
+            nodeColor={(n: any) => TYPE_COLORS[n.data?.field_type] || '#6b7280'}
           />
         </ReactFlow>
         </div>

@@ -33,7 +33,7 @@ def history(user: dict = Depends(get_current_user)):
     with get_cursor() as cur:
         cur.execute(
             "SELECT id, sql_text, comment, subquery_hash, field_count, sq_count, created_at "
-            "FROM build_history ORDER BY id DESC LIMIT 20"
+            "FROM build_history ORDER BY id DESC LIMIT 500"
         )
         items = [dict(r) for r in cur.fetchall()]
     return {"code": 0, "data": {"items": items}, "message": "ok"}
@@ -68,19 +68,28 @@ def graph(
                 )
                 sq_structures = [r["structure"] for r in cur.fetchall()]
 
-                # 收集所有可达的 field hash
+                # 收集所有可达的 field hash（先收集顶层子查询）
                 reachable = set()
-                queue = []
-                for struct in sq_structures:
-                    for fh in struct.get("fields", []):
-                        reachable.add(fh)
-                        queue.append(fh)
-                    wh = struct.get("where")
-                    if wh:
-                        reachable.add(wh)
-                        queue.append(wh)
+                sq_queue: list[str] = list(sq_hashes)
 
-                # BFS
+                # 递归展开 UNION 的 branches
+                while sq_queue:
+                    sq_h = sq_queue.pop(0)
+                    cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_h,))
+                    sq_row = cur.fetchone()
+                    if not sq_row:
+                        continue
+                    struct = sq_row["structure"]
+                    for fh in struct.get("fields", []):
+                        if fh not in reachable:
+                            reachable.add(fh)
+                    # UNION: 把 branches（子查询 hash）加入 sq_queue 继续展开
+                    for branch_h in struct.get("branches", []):
+                        if branch_h not in reachable:
+                            sq_queue.append(branch_h)
+
+                # BFS 沿 field_references 向下追溯
+                queue = list(reachable)
                 while queue:
                     fh = queue.pop(0)
                     cur.execute(
@@ -293,6 +302,12 @@ def _node_label(field_type: str, expr: dict) -> str:
         return "CASE WHEN"
     elif op in ("JOIN",):
         return "JOIN(...)"
+    elif op == "WHERE":
+        return "WHERE(...)"
+    elif op == "subquery":
+        return "SUBQUERY"
+    elif op == "current_timestamp":
+        return "NOW()"
     elif op in ("and", "or"):
         return op.upper()
     elif op in ("eq", "neq", "gt", "lt", "gte", "lte", "in", "notin"):

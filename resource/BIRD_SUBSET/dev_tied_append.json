@@ -1,0 +1,26 @@
+[
+  {
+    "question_id": 101,
+    "db_id": "financial",
+    "question": "List out the accounts who have the earliest trading date in 1995 ?",
+    "evidence": "",
+    "SQL": "SELECT account_id FROM trans WHERE STRFTIME('%Y', date) = '1995' ORDER BY date ASC LIMIT 1",
+    "difficulty": "simple"
+  },
+  {
+    "question_id": 189,
+    "db_id": "financial",
+    "question": "Name the account numbers of female clients who are oldest and have lowest average salary?",
+    "evidence": "Female refers to 'F' in the gender; A11 contains information about average salary",
+    "SQL": "SELECT T3.account_id FROM client AS T1 INNER JOIN district AS T2 ON T1.district_id = T2.district_id INNER JOIN account AS T3 ON T2.district_id = T3.district_id WHERE T1.gender = 'F' AND T1.birth_date = (SELECT MIN(birth_date) FROM client WHERE gender = 'F') AND T2.A11 = (SELECT MIN(T2.A11) FROM client AS T1 INNER JOIN district AS T2 ON T1.district_id = T2.district_id WHERE T1.gender = 'F' AND T1.birth_date = (SELECT MIN(birth_date) FROM client WHERE gender = 'F'))",
+    "difficulty": "moderate"
+  },
+  {
+    "question_id": 1517,
+    "db_id": "debit_card_specializing",
+    "question": "For the earliest customer, what segment did he/she have?",
+    "evidence": "",
+    "SQL": "SELECT T2.Segment FROM transactions_1k AS T1 INNER JOIN customers AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Date = (SELECT MIN(Date) FROM transactions_1k)",
+    "difficulty": "simple"
+  }
+]

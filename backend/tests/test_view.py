@@ -66,11 +66,14 @@ class TestView:
     def test_view_source(self, clean_db):
         """source=view 表正确显示"""
         with get_cursor() as cur:
+            cur.execute("SELECT id FROM databases WHERE name = 'mydb'")
+            db_id = cur.fetchone()["id"]
             cur.execute("DELETE FROM tables WHERE table_name = 'v_check_source'")
             cur.execute(
                 "INSERT INTO tables (database_id, table_name, table_type, source) "
-                "VALUES (1, 'v_check_source', '视图', 'view') "
-                "ON CONFLICT (database_id, table_name) DO NOTHING"
+                "VALUES (%s, 'v_check_source', '视图', 'view') "
+                "ON CONFLICT (database_id, table_name) DO NOTHING",
+                (db_id,),
             )
             cur.execute("SELECT source FROM tables WHERE table_name='v_check_source'")
             assert cur.fetchone()["source"] == "view"

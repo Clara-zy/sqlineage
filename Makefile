@@ -1,4 +1,4 @@
-.PHONY: install dev backend frontend stop db-init test lint clean
+.PHONY: install dev backend frontend stop db-init import-tests bird-import test lint clean
 
 PYTHON = python3.13
 VENV = backend/.venv
@@ -33,6 +33,18 @@ db-init:
 
 test:
 	env PYTHONPATH=backend $(VENV)/bin/pytest backend/tests/$(ARGS) -v
+
+import-tests:
+	@echo "Importing test cases from resource/test_sqls.json..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/import_tests.py
+
+bird-import:
+	@echo "Importing BIRD test cases from resource/BIRD_SUBSET/dev.json..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/bird_import.py
+
+import-all: import-tests
+	@echo "Importing BIRD test cases on top..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/bird_import.py
 
 explore:
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/explore.py $(SQL)

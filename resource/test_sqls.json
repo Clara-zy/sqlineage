@@ -1,0 +1,308 @@
+[
+  {
+    "id": "L0-01",
+    "title": "单表全字段查询",
+    "description": "验证所有原子字段节点正确创建",
+    "sql": "SELECT trans_id, mchnt_cd, trans_at FROM trans_flow",
+    "tags": ["layer0", "atomic"],
+    "expected": "7 个 atomic 字段节点，field_references 无边"
+  },
+  {
+    "id": "L0-02",
+    "title": "单表部分列查询",
+    "description": "验证原子字段选择性创建，字段节点数等于引用列数",
+    "sql": "SELECT trans_id, trans_at FROM trans_flow",
+    "tags": ["layer0", "atomic"],
+    "expected": "2 个 atomic 字段（trans_id, trans_at），其他列不生成"
+  },
+  {
+    "id": "L1-01",
+    "title": "nvl 表达式",
+    "description": "验证 nvl 二元函数生成 expression 节点，args 两个子节点",
+    "sql": "SELECT nvl(mchnt_cd, 'UNKNOWN') AS safe_cd FROM trans_flow",
+    "tags": ["layer1", "expression", "alias"],
+    "expected": "atomic(mchnt_cd) + literal('UNKNOWN') → nvl → alias(safe_cd)"
+  },
+  {
+    "id": "L1-02",
+    "title": "round 除法表达式",
+    "description": "验证算术运算表达式的层级结构",
+    "sql": "SELECT round(trans_at / 100, 2) AS yuan FROM trans_flow",
+    "tags": ["layer1", "expression", "arithmetic"],
+    "expected": "atomic(trans_at) + literal(100) → div → round → alias(yuan)"
+  },
+  {
+    "id": "L1-03",
+    "title": "concat 表达式",
+    "description": "验证字符串拼接函数",
+    "sql": "SELECT concat(trans_status, '_', 'SUFFIX') AS tagged FROM trans_flow",
+    "tags": ["layer1", "expression"],
+    "expected": "atomic(trans_status) + literal('SUFFIX') → concat → alias(tagged)"
+  },
+  {
+    "id": "L1-04",
+    "title": "CAST 类型转换",
+    "description": "验证 CAST 表达式保留 to_type 元信息",
+    "sql": "SELECT CAST(region_cd AS STRING) AS rc FROM trans_flow",
+    "tags": ["layer1", "expression", "cast"],
+    "expected": "atomic(region_cd) → cast(to_type=STRING) → alias(rc)"
+  },
+  {
+    "id": "L1-05",
+    "title": "组合表达式",
+    "description": "验证多表达式投影：nvl + round + concat 同时出现",
+    "sql": "SELECT trans_id, nvl(mchnt_cd, 'UNKNOWN') AS mchnt_cd, round(trans_at / 100, 2) AS trans_at_yuan, concat(trans_status, '_', CAST(region_cd AS STRING)) AS status_region FROM trans_flow",
+    "tags": ["layer1", "expression", "combined"],
+    "expected": "8 个字段节点，层级清晰无交叉引用错误"
+  },
+  {
+    "id": "L1-06",
+    "title": "算术二元运算",
+    "description": "验证加减乘除等二元运算的字段生成和引用",
+    "sql": "SELECT trans_at * 1.1 + 5 AS adjusted FROM trans_flow",
+    "tags": ["layer1", "expression", "arithmetic"],
+    "expected": "atomic(trans_at) → mul(1.1) → add(5) → alias(adjusted)"
+  },
+  {
+    "id": "L2-01",
+    "title": "简单聚合 sum + WHERE",
+    "description": "验证聚合函数被 groupby 包装，WHERE 条件独立",
+    "sql": "SELECT sum(trans_at) AS total_at FROM trans_flow WHERE trans_status = 'SUCCESS'",
+    "tags": ["layer2", "aggregate", "where"],
+    "expected": "sum 节点 → groupby 包装，WHERE 以 field 节点包裹投影列"
+  },
+  {
+    "id": "L2-02",
+    "title": "多聚合 + GROUP BY",
+    "description": "验证多个聚合函数共享 group_keys，各聚合独立 groupby 包装",
+    "sql": "SELECT mchnt_cd, sum(trans_at) AS total_at, count(1) AS total_cnt, avg(trans_at) AS avg_at, max(trans_at) AS max_at, min(trans_at) AS min_at FROM trans_flow WHERE trans_status = 'SUCCESS' GROUP BY mchnt_cd",
+    "tags": ["layer2", "aggregate", "groupby"],
+    "expected": "5 个 groupby 节点共享同一个 group_key(mchnt_cd)"
+  },
+  {
+    "id": "L2-03",
+    "title": "COUNT(*)",
+    "description": "验证 COUNT(*) 的 star 字面量处理",
+    "sql": "SELECT count(*) AS cnt FROM trans_flow",
+    "tags": ["layer2", "aggregate", "star"],
+    "expected": "star 字面量 → count → groupby(无 key)"
+  },
+  {
+    "id": "L2-04",
+    "title": "两表 LEFT JOIN",
+    "description": "验证 LEFT JOIN 仅右表字段包裹 JOIN 表达式，左表字段穿透",
+    "sql": "SELECT a.trans_id, b.mchnt_nm FROM trans_flow a LEFT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd",
+    "tags": ["layer2", "join", "left"],
+    "expected": "a.trans_id 无 JOIN 包裹，b.mchnt_nm 有 JOIN 包裹"
+  },
+  {
+    "id": "L2-05",
+    "title": "两表 LEFT JOIN + 聚合",
+    "description": "验证 JOIN 与聚合同时出现时的层级叠加",
+    "sql": "SELECT b.region_nm, count(1) AS trans_cnt FROM trans_flow a LEFT JOIN dim_domin b ON a.region_cd = b.region_cd WHERE a.trans_status = 'SUCCESS' AND a.trans_time >= '2026-06-01 00:00:00' AND a.trans_time < '2026-07-01 00:00:00' GROUP BY b.region_nm",
+    "tags": ["layer2", "join", "aggregate", "where"],
+    "expected": "region_nm 包 JOIN → groupby → WHERE，cnt 包 groupby → WHERE"
+  },
+  {
+    "id": "L2-06",
+    "title": "三表 LEFT JOIN + 聚合",
+    "description": "验证链式 LEFT JOIN：每步仅新的右表字段被包裹",
+    "sql": "SELECT c.industry_nm, count(1) AS refund_cnt, sum(a.trans_at) AS refund_at FROM trans_flow a LEFT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd LEFT JOIN dim_industry c ON b.industry_id = c.industry_id WHERE a.trans_status = 'REFUND' AND c.industry_nm = '酒店' AND a.trans_time >= '2026-06-01 00:00:00' AND a.trans_time < '2026-07-01 00:00:00' GROUP BY c.industry_nm",
+    "tags": ["layer3", "join", "aggregate"],
+    "expected": "a 列无 JOIN，b 列 JOIN(cond1)，c 列 JOIN(cond2)"
+  },
+  {
+    "id": "L3-01",
+    "title": "简单子查询（FROM 子查询）",
+    "description": "验证子查询作为独立公民，外层引用子查询投影列",
+    "sql": "SELECT t.trans_id FROM (SELECT trans_id FROM trans_flow) t",
+    "tags": ["layer4", "subquery"],
+    "expected": "1 个内层 subquery + 1 个外层 subquery，引用链正确"
+  },
+  {
+    "id": "L3-02",
+    "title": "聚合子查询（嵌套）",
+    "description": "验证子查询+聚合的嵌套结构，内外 group_keys 独立",
+    "sql": "SELECT a.mchnt_cd, a.total_cnt, a.total_at FROM (SELECT mchnt_cd, count(1) AS total_cnt, sum(trans_at) AS total_at FROM trans_flow WHERE trans_status = 'SUCCESS' GROUP BY mchnt_cd) a WHERE a.total_cnt > 10",
+    "tags": ["layer4", "subquery", "aggregate"],
+    "expected": "内层子查询产生 groupby 节点，外层引用已聚合并包 WHERE"
+  },
+  {
+    "id": "L4-01",
+    "title": "CASE WHEN（含 ELSE）",
+    "description": "验证 casewhen 表达式的条件分支结构",
+    "sql": "SELECT trans_id, trans_at, CASE WHEN trans_at > 10000 THEN '大额' WHEN trans_at > 1000 THEN '中额' WHEN trans_at > 100 THEN '小额' ELSE '微额' END AS amt_level FROM trans_flow",
+    "tags": ["layer6", "casewhen"],
+    "expected": "4 个 WHEN 分支(condition+value) + 1 个 ELSE → casewhen → alias"
+  },
+  {
+    "id": "L4-02",
+    "title": "CASE WHEN（无 ELSE）",
+    "description": "验证 CASE WHEN 在无 ELSE 时的处理（最后一个 condition=null）",
+    "sql": "SELECT CASE WHEN trans_at > 1000 THEN 'HIGH' END AS level FROM trans_flow",
+    "tags": ["layer6", "casewhen"],
+    "expected": "1 个 WHEN 分支(condition+value)，无 ELSE 则最后 condition=null"
+  },
+  {
+    "id": "L5-01",
+    "title": "AND/OR 组合条件",
+    "description": "验证复合条件被扁平化（嵌套 AND/OR 展开为同一层）",
+    "sql": "SELECT sum(trans_at) as trans_at, count(*) AS cnt FROM trans_flow WHERE trans_status = 'SUCCESS' AND (trans_at > 500 OR mchnt_cd IN ('M001', 'M002'))",
+    "tags": ["layer5", "condition", "composite"],
+    "expected": "AND 节点 args 包含扁平化的子条件列表"
+  },
+  {
+    "id": "L5-02",
+    "title": "IN / NOT IN 条件",
+    "description": "验证 IN 和 NOT IN 条件的字段结构",
+    "sql": "SELECT count(*) AS cnt FROM trans_flow WHERE trans_status IN ('SUCCESS', 'REFUND') AND mchnt_cd NOT IN ('M9999')",
+    "tags": ["layer5", "condition"],
+    "expected": "2 个条件节点（in 和 notin），各自引用字段+字面量列表"
+  },
+  {
+    "id": "L5-03",
+    "title": "IS NOT NULL 条件",
+    "description": "验证一元条件 IS NULL / IS NOT NULL",
+    "sql": "SELECT count(*) AS cnt FROM trans_flow WHERE trans_at IS NOT NULL",
+    "tags": ["layer5", "condition"],
+    "expected": "is 条件节点，args 包含 trans_at + Null 字面量"
+  },
+  {
+    "id": "L5-04",
+    "title": "复合嵌套条件",
+    "description": "验证多层 AND/OR/IN/NOT IN 嵌套的扁平化处理",
+    "sql": "SELECT count(DISTINCT usr_id) AS cnt FROM usr_behave_bury bu WHERE bu.behave_time >= '2026-06-01' AND (bu.behave_type = 'CLICK' OR bu.behave_type = 'VIEW') AND bu.mchnt_cd NOT IN ('M9999')",
+    "tags": ["layer5", "condition", "composite"],
+    "expected": "AND 节点 args 含 is + or(展开) + notin"
+  },
+  {
+    "id": "SINK-01",
+    "title": "sink 表绑定（middle 表写入）",
+    "description": "验证 sink 表写入后 table_input_subqueries + table_column_mappings 正确创建",
+    "sql": "SELECT mchnt_cd, date_format(trans_time, 'yyyyMMdd') AS stat_date, count(1) AS trans_cnt, sum(trans_at) AS trans_at, sum(CASE WHEN trans_status = 'SUCCESS' THEN 1 ELSE 0 END) AS succ_cnt FROM trans_flow WHERE trans_time >= '2026-06-01 00:00:00' GROUP BY mchnt_cd, date_format(trans_time, 'yyyyMMdd')",
+    "tags": ["sink", "middle"],
+    "expected": "5 个 table_column_mappings 按 ordinal_position 对齐 dws_mchnt_day",
+    "sink_table": "dws_mchnt_day"
+  },
+  {
+    "id": "L6-01",
+    "title": "UNION ALL",
+    "description": "验证 UNION 子查询的两个分支独立构建，共享重叠字段",
+    "sql": "SELECT trans_id FROM trans_flow WHERE trans_status = 'SUCCESS' UNION ALL SELECT trans_id FROM trans_flow WHERE trans_status = 'REFUND'",
+    "tags": ["layer7", "union"],
+    "expected": "2 个 SELECT 分支子查询 + 1 个 UNION 顶层子查询，trans_id 原子字段复用"
+  },
+  {
+    "id": "L6-02",
+    "title": "UNION + 聚合（middle 表）",
+    "description": "验证 UNION 引用 middle 表字段的链路",
+    "sql": "SELECT mchnt_cd, 'day' AS stat_level, stat_date AS stat_time, trans_cnt, trans_at FROM dws_mchnt_day WHERE stat_date >= '20260601' UNION ALL SELECT mchnt_cd, 'month' AS stat_level, substring(stat_date, 1, 6) AS stat_time, sum(trans_cnt) AS trans_cnt, sum(trans_at) AS trans_at FROM dws_mchnt_day WHERE stat_date >= '20260601' GROUP BY mchnt_cd, substring(stat_date, 1, 6)",
+    "tags": ["layer7", "union", "middle"],
+    "expected": "dws_mchnt_day 字段通过 table_column_mappings 解析"
+  },
+  {
+    "id": "L7-01",
+    "title": "窗口函数 ROW_NUMBER",
+    "description": "验证 window 表达式的 partition_by + order_by 结构",
+    "sql": "SELECT mchnt_cd, trans_id, row_number() OVER (PARTITION BY mchnt_cd ORDER BY trans_time) AS rn FROM trans_flow",
+    "tags": ["layer8", "window"],
+    "expected": "window 节点含 partition_by=[mchnt_cd], order_by=[trans_time]"
+  },
+  {
+    "id": "L7-02",
+    "title": "窗口函数 SUM + 累计求和",
+    "description": "验证 SUM OVER 窗口函数的 cumsum 语义",
+    "sql": "SELECT mchnt_cd, trans_id, trans_at, trans_time, sum(trans_at) OVER (PARTITION BY mchnt_cd ORDER BY trans_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumsum_at FROM trans_flow WHERE trans_status = 'SUCCESS'",
+    "tags": ["layer8", "window", "aggregate"],
+    "expected": "window 节点含 frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+  },
+  {
+    "id": "L8-01",
+    "title": "简单 CTE（单层 WITH）",
+    "description": "验证 CTE 作为独立子查询构建，主查询引用 CTE 别名",
+    "sql": "WITH succ_trans AS (SELECT mchnt_cd, trans_at, trans_time FROM trans_flow WHERE trans_status = 'SUCCESS') SELECT mchnt_cd, sum(trans_at) AS total_at FROM succ_trans GROUP BY mchnt_cd",
+    "tags": ["cte"],
+    "expected": "CTE 子查询独立，主查询通过 alias_map 解析 CTE 列"
+  },
+  {
+    "id": "L8-02",
+    "title": "多层 CTE（WITH 链）",
+    "description": "验证多个 CTE 之间的引用关系",
+    "sql": "WITH succ AS (SELECT mchnt_cd, trans_at, trans_time FROM trans_flow WHERE trans_status = 'SUCCESS'), stats AS (SELECT mchnt_cd, sum(trans_at) AS total_at, count(1) AS cnt FROM succ GROUP BY mchnt_cd) SELECT a.mchnt_cd, b.mchnt_nm, a.total_at, a.cnt FROM stats a LEFT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd",
+    "tags": ["cte", "join"],
+    "expected": "succ → stats → 主查询，三层引用链正确"
+  },
+  {
+    "id": "L9-01",
+    "title": "3 表连续 INNER JOIN",
+    "description": "验证累积 JOIN 包裹：a 列包两层，b 列包两层，c 列包一层",
+    "sql": "SELECT a.trans_id, b.mchnt_nm, c.industry_nm FROM trans_flow a INNER JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd INNER JOIN dim_industry c ON b.industry_id = c.industry_id",
+    "tags": ["join", "inner", "cumulative"],
+    "expected": "a: JOIN(JOIN(atomic, cond1), cond2), b: JOIN(JOIN(atomic, cond1), cond2), c: JOIN(atomic, cond2)"
+  },
+  {
+    "id": "L9-02",
+    "title": "INNER + LEFT 混合 JOIN",
+    "description": "验证先 INNER（左右都包）再 LEFT（仅右表包）的混合语义",
+    "sql": "SELECT a.trans_id, b.mchnt_nm, c.industry_nm FROM trans_flow a INNER JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd LEFT JOIN dim_industry c ON b.industry_id = c.industry_id",
+    "tags": ["join", "mixed"],
+    "expected": "a 包 cond1，b 包 cond1，c 包 cond2（不包 cond1）"
+  },
+  {
+    "id": "L9-03",
+    "title": "LATERAL VIEW explode",
+    "description": "验证 lateral view 的 JOIN(lateral=true) 表达式",
+    "sql": "SELECT mchnt_cd, mchnt_nm, industry_tag FROM dim_mchnt LATERAL VIEW explode(split(industry_list, ',')) t AS industry_tag",
+    "tags": ["lateral"],
+    "expected": "JOIN 节点含 lateral: true 标记"
+  },
+  {
+    "id": "L9-04",
+    "title": "RIGHT JOIN 转 LEFT JOIN",
+    "description": "验证 RIGHT JOIN 被 normalizer 自动转换为 LEFT JOIN",
+    "sql": "SELECT a.trans_id, b.mchnt_nm FROM trans_flow a RIGHT JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd",
+    "tags": ["join", "right", "normalizer"],
+    "expected": "等价于 FROM dim_mchnt b LEFT JOIN trans_flow a，a 列包 JOIN"
+  },
+  {
+    "id": "VIEW-01",
+    "title": "VIEW 创建与查询",
+    "description": "验证 VIEW 作为虚拟表的字段解析（通过子查询 projection）",
+    "sql": "SELECT mchnt_nm, industry_id FROM dim_mchnt",
+    "tags": ["view"],
+    "expected": "VIEW 通过子查询 projection 按 alias 匹配字段 hash",
+    "view_create": "CREATE VIEW v_mchnt_brief AS SELECT mchnt_nm, industry_id FROM dim_mchnt"
+  },
+  {
+    "id": "ENUM-01",
+    "title": "枚举值解析（DDL COMMENT ENUM）",
+    "description": "验证 DDL COMMENT 中 ENUM(...) 解析并写入 field_enums",
+    "sql": "SELECT trans_status FROM trans_flow",
+    "tags": ["enum"],
+    "expected": "field_enums 中有 trans_status 的 ['SUCCESS','FAIL','REFUND']"
+  },
+  {
+    "id": "ENUM-02",
+    "title": "枚举值 alias 继承",
+    "description": "验证 alias 节点继承内层字段的枚举值",
+    "sql": "SELECT trans_status AS status FROM trans_flow",
+    "tags": ["enum", "alias"],
+    "expected": "alias(status) 继承 trans_status 的枚举值"
+  },
+  {
+    "id": "ENUM-03",
+    "title": "枚举值 JOIN 继承",
+    "description": "验证 JOIN 节点继承被包裹字段的枚举值",
+    "sql": "SELECT a.trans_id, b.mchnt_nm FROM trans_flow a INNER JOIN dim_mchnt b ON a.mchnt_cd = b.mchnt_cd",
+    "tags": ["enum", "join"],
+    "expected": "a.trans_id 的 JOIN 节点继承 trans_id 的枚举值"
+  },
+  {
+    "id": "FULLJOIN-01",
+    "title": "FULL JOIN 转 UNION",
+    "description": "验证 FULL OUTER JOIN 被 normalizer 转换为 (LEFT JOIN) UNION (LEFT JOIN)",
+    "sql": "SELECT coalesce(a.mchnt_cd, b.mchnt_cd) AS mchnt_cd, a.trans_cnt, b.behave_cnt FROM (SELECT mchnt_cd, count(1) AS trans_cnt FROM trans_flow WHERE trans_time >= '2026-06-01' GROUP BY mchnt_cd) a FULL JOIN (SELECT mchnt_cd, count(1) AS behave_cnt FROM usr_behave_bury WHERE behave_time >= '2026-06-01' GROUP BY mchnt_cd) b ON a.mchnt_cd = b.mchnt_cd",
+    "tags": ["join", "full", "union"],
+    "expected": "产生 UNION 子查询，两个分支分别为 LEFT JOIN"
+  }
+]

@@ -18,7 +18,6 @@ def validate_no_limit(sql: str):
         ast = sqlglot.parse_one(sql)
     except Exception:
         raise ValidationError(49001, "SQL 语法错误，无法解析")
-    # 处理 WITH 包裹 — 找到最内层 Select
     _check_no_limit(ast)
 
 
@@ -29,7 +28,6 @@ def _check_no_limit(node: exp.Expression):
         for child_node in node.walk():
             if isinstance(child_node, exp.Limit):
                 raise ValidationError(49001, "SQL 中包含 LIMIT，禁止入血缘")
-    # 对 CTE 递归
     ctes = node.args.get("with")
     if ctes:
         for cte in (ctes.expressions or []):
@@ -38,36 +36,11 @@ def _check_no_limit(node: exp.Expression):
 
 def validate_join_rules(ast: exp.Expression):
     """
-    校验 JOIN 规范：
-    - 3+ 表连续 join 只允许全部 LEFT JOIN
-    - inner/right/full join 不能出现在连续 join 串中
+    校验 JOIN 规范。
+    RIGHT/FULL JOIN 由 normalizer 前置转换，不应到达此处；
+    连续 INNER JOIN 和 INNER+LEFT 混合均已放开。
     """
-    # 递归检查每个 SELECT 的 join 链
-    _check_joins(ast)
-
-
-def _check_joins(node: exp.Expression):
-    """递归检查 JOIN 链"""
-    if isinstance(node, exp.Select):
-        joins = node.args.get("joins") or []
-        if len(joins) >= 2:  # 3+ 表的连续 join
-            # 检查所有 join 是否都是 LEFT
-            for j in joins:
-                side = (j.args.get("side") or "").upper()
-                kind = (j.args.get("kind") or "").upper()
-                # LEFT JOIN: side="LEFT", kind="JOIN"
-                # INNER JOIN: side=None, kind="INNER"
-                if (side and side != "LEFT") or (kind and kind not in ("JOIN", "")):
-                    detected = side or kind
-                    raise ValidationError(
-                        49002,
-                        f"多表连续 JOIN 只允许 LEFT JOIN，检测到 {detected} JOIN",
-                    )
-
-    # 递归进入子查询
-    for child in node.walk():
-        if isinstance(child, exp.Select) and child is not node:
-            _check_joins(child)
+    pass
 
 
 def validate_tables_exist(ast: exp.Expression, ctx) -> list[dict]:

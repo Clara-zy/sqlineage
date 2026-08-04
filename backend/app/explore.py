@@ -42,6 +42,10 @@ def _summarize(expr: dict) -> str:
         return f"{op}(...)"
     elif op == "casewhen":
         return "CASE WHEN ... END"
+    elif op == "WHERE":
+        return "WHERE(...)"
+    elif op == "current_timestamp":
+        return "CURRENT_TIMESTAMP"
     elif op == "star":
         return "*"
     else:
