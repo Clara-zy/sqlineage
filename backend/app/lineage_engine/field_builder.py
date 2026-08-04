@@ -105,93 +105,89 @@ def build_alias(node: exp.Alias, ctx: BuildContext) -> str:
 # ── 2. 聚合 groupby 包装 ──
 
 def build_function(node: exp.Expression, ctx: BuildContext) -> str:
-    """函数类表达式"""
-
-    # 确定 op 名
+    """函数类表达式 — 通用 args 遍历，位置参数 + 命名参数"""
     op = _function_op(node)
+    pos_hashes, named_params = _extract_args(node, ctx)
 
-    # 提取子表达式
-    child_hashes = _function_children(node, ctx)
+    expression = {"op": op, "args": [{"hash": h} for h in pos_hashes]}
+    if named_params:
+        expression["params"] = named_params
 
-    expression = {"op": op, "args": [{"hash": h} for h in child_hashes]}
     h = compute_hash(expression)
     ctx.upsert_field(h, "expression", expression)
-    for ch in child_hashes:
+    for ch in pos_hashes:
         ctx.upsert_field_reference(ch, h)
+    for v in named_params.values():
+        if isinstance(v, str) and len(v) == 16:  # hash reference
+            ctx.upsert_field_reference(v, h)
 
     # 聚合函数 → groupby 包装
     if op in ("sum", "count", "avg", "min", "max") and ctx.group_keys:
-        h = _wrap_groupby(h, child_hashes, ctx)
+        h = _wrap_groupby(h, pos_hashes, ctx)
 
     return h
 
 
 def _function_op(node: exp.Expression) -> str:
-    if isinstance(node, exp.Coalesce):     return "nvl"
-    if isinstance(node, exp.Concat):       return "concat"
-    if isinstance(node, exp.Substring):    return "substring"
-    if isinstance(node, exp.Round):        return "round"
-    if isinstance(node, exp.Count):        return "count"
-    if isinstance(node, exp.Sum):          return "sum"
-    if isinstance(node, exp.Avg):          return "avg"
-    if isinstance(node, exp.Min):          return "min"
-    if isinstance(node, exp.Max):          return "max"
-    if isinstance(node, exp.RowNumber):    return "row_number"
-    if isinstance(node, exp.Explode):      return "explode"
-    if isinstance(node, exp.Split):        return "split"
-    if hasattr(node, "name") and node.name: return node.name.lower()
-    return type(node).__name__.lower()
+    # 优先按类型匹配（避免 Cast 等有 name 属性但语义不符的节点走错）
+    type_name = type(node).__name__.lower()
+    _type_ops = {
+        "coalesce": "nvl", "concat": "concat", "substring": "substring",
+        "round": "round", "cast": "cast", "if": "if",
+        "count": "count", "sum": "sum", "avg": "avg", "min": "min", "max": "max",
+        "rownumber": "row_number", "explode": "explode", "split": "split",
+    }
+    if type_name in _type_ops:
+        return _type_ops[type_name]
+    if hasattr(node, "name") and node.name and isinstance(node.name, str):
+        return node.name.lower()
+    return type_name
 
 
-def _function_children(node: exp.Expression, ctx: BuildContext) -> list[str]:
-    children = []
+def _extract_args(node: exp.Expression, ctx: BuildContext) -> tuple[list[str], dict[str, str]]:
+    """通用参数提取：位置参数入 list，命名参数入 dict。
+    遍历 node.args 中所有 Expression 类型的值，跳过元数据 key。
+    """
+    pos_hashes: list[str] = []
+    named: dict[str, str] = {}
 
-    if isinstance(node, exp.Coalesce):
-        children.append(build_field(node.this, ctx))
-        for arg in (node.expressions or []):
-            children.append(build_field(arg, ctx))
-    elif isinstance(node, exp.Substring):
-        children.append(build_field(node.this, ctx))
-        for key in ("start", "length"):
-            arg = node.args.get(key)
-            if arg:
-                children.append(build_field(arg, ctx))
-    elif isinstance(node, exp.Concat):
-        for arg in (node.expressions or []):
-            children.append(build_field(arg, ctx))
-    elif isinstance(node, (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max)):
-        if node.args.get("this"):
-            children.append(build_field(node.this, ctx))
-        for arg in (node.expressions or []):
-            children.append(build_field(arg, ctx))
-    elif isinstance(node, exp.Round):
-        children.append(build_field(node.this, ctx))
-        decimals = node.args.get("decimals")
-        if decimals:
-            children.append(build_field(decimals, ctx))
-    elif isinstance(node, exp.If):
-        # IIF / IF(cond, true_val, false_val)
-        children.append(build_field(node.this, ctx))
-        for key in ("true", "false"):
-            arg = node.args.get(key)
-            if arg:
-                children.append(build_field(arg, ctx))
-    elif isinstance(node, (exp.RowNumber,)):
-        # row_number() 无参数
-        pass
-    elif isinstance(node, (exp.Explode, exp.Split)):
-        # explode / split 的子表达式
-        if node.args.get("this"):
-            children.append(build_field(node.this, ctx))
-        for arg in (node.expressions or []):
-            children.append(build_field(arg, ctx))
-    elif hasattr(node, "expressions") and node.expressions:
-        for arg in node.expressions:
-            children.append(build_field(arg, ctx))
-    elif hasattr(node, "this") and node.this:
-        children.append(build_field(node.this, ctx))
+    # 元数据 / 内部标记 key，不参与血缘
+    SKIP_KEYS = {"distinct", "spec", "default", "is_global", "safe", "coalesce", "action", "format"}
 
-    return children
+    done_keys = set()
+
+    # this 总是第一个位置参数
+    this = node.args.get("this")
+    if this is not None and isinstance(this, exp.Expression):
+        pos_hashes.append(build_field(this, ctx))
+        done_keys.add("this")
+
+    # expression 作为第二个位置参数
+    expr = node.args.get("expression")
+    if expr is not None and isinstance(expr, exp.Expression):
+        pos_hashes.append(build_field(expr, ctx))
+        done_keys.add("expression")
+
+    # expressions 列表作为后续位置参数
+    for e in (node.args.get("expressions") or []):
+        if isinstance(e, exp.Expression):
+            pos_hashes.append(build_field(e, ctx))
+    done_keys.add("expressions")
+
+    # 其余 args 中的 Expression → named params；字符串 → 原样保留
+    for key, val in node.args.items():
+        if key in done_keys or key in SKIP_KEYS:
+            continue
+        if isinstance(val, exp.DataType):
+            named[key] = val.sql()  # cast 的 to 类型名
+        elif isinstance(val, exp.Expression):
+            named[key] = build_field(val, ctx)
+        elif isinstance(val, str) and val:
+            named[key] = val
+        elif isinstance(val, (int, float)):
+            named[key] = str(val)
+
+    return pos_hashes, named
 
 
 def _wrap_groupby(agg_hash: str, agg_children: list[str], ctx: BuildContext) -> str:
@@ -509,13 +505,8 @@ def build_case_when(node: exp.Case, ctx: BuildContext) -> str:
 
 
 def build_cast(node: exp.Cast, ctx: BuildContext) -> str:
-    inner_h = build_field(node.this, ctx)
-    to_type = node.to.sql() if hasattr(node.to, "sql") else str(node.to)
-    expression = {"op": "cast", "args": [{"hash": inner_h}], "to_type": to_type}
-    h = compute_hash(expression)
-    ctx.upsert_field(h, "expression", expression)
-    ctx.upsert_field_reference(inner_h, h)
-    return h
+    """CAST 委托给通用 build_function（to 类型名由 _extract_args 处理）"""
+    return build_function(node, ctx)
 
 
 def build_star(node: exp.Star, ctx: BuildContext) -> str:

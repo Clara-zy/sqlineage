@@ -25,12 +25,9 @@ def main():
     # 确保种子数据存在
     seed()
 
-    # 清空旧的非 BIRD 构建历史
+    # 清空旧的构建历史
     with get_cursor() as cur:
-        cur.execute(
-            "DELETE FROM build_history WHERE comment NOT LIKE %s",
-            ("[BIRD]%",),
-        )
+        cur.execute("DELETE FROM build_history")
 
     manifest_path = os.path.abspath(MANIFEST_PATH)
     if not os.path.exists(manifest_path):
