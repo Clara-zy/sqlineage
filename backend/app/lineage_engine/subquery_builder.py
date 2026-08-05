@@ -61,14 +61,21 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
             wrapped.append(wh)
         field_hashes = wrapped
 
-    # 6. ORDER BY — 构建 sort key field 节点
+    # 6. ORDER BY — 构建 sort key field 节点，包 ordr 包裹
     order_keys = []
     order_expr = node.args.get("order")
     if order_expr:
         for o in (order_expr.expressions if hasattr(order_expr, "expressions") else []):
             key_h = build_field(o, ctx)
             desc = bool(o.args.get("desc"))
-            order_keys.append({"hash": key_h, "desc": desc})
+            # 创建 ordr 包裹节点
+            ordr_expr = {"op": "ordr", "args": [{"hash": key_h}], "desc": desc}
+            oh = compute_hash(ordr_expr)
+            ctx.upsert_field(oh, "expression", ordr_expr)
+            ctx.upsert_field_reference(key_h, oh)
+            from app.field_enums import inherit_enum
+            inherit_enum(key_h, oh)
+            order_keys.append({"hash": oh, "desc": desc})
 
     # 7. LIMIT 包裹每个投影列
     limit_val = None
