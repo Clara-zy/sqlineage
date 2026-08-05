@@ -83,6 +83,10 @@ def graph(
                     for fh in struct.get("fields", []):
                         if fh not in reachable:
                             reachable.add(fh)
+                    # HAVING 条件引用聚合，不在 fields 中，需显式加入
+                    having_h = struct.get("having")
+                    if having_h and having_h not in reachable:
+                        reachable.add(having_h)
                     # UNION: 把 branches（子查询 hash）加入 sq_queue 继续展开
                     for branch_h in struct.get("branches", []):
                         if branch_h not in reachable:
