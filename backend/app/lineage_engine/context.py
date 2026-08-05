@@ -23,6 +23,7 @@ class BuildContext:
         self.group_keys: list[str] = []  # 当前子查询的 GROUP BY 字段 hash 列表
         self.pending_where: str | None = None  # 当前子查询的 WHERE hash，列引用时应用
         self.pending_having: str | None = None  # 当前子查询的 HAVING hash，聚合后应用
+        self.inner_subqueries: list[str] = []  # 当前子查询内嵌的子查询 hash（FROM 子查询）
 
     # ── 表结构查询 ──
 

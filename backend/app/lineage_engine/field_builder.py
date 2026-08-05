@@ -361,6 +361,7 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
             inner_sq_hash, alias_to_hash = build_subquery_select(inner, ctx)
             alias_map[outer_alias] = f"__subquery__{inner_sq_hash}"
             ctx.subquery_map[outer_alias] = {"sq_hash": inner_sq_hash, "ast": inner, "alias_to_hash": alias_to_hash}
+            ctx.inner_subqueries.append(inner_sq_hash)
             return outer_alias
 
     # ── FROM ──

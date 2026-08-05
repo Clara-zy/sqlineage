@@ -51,12 +51,21 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         elif isinstance(expr, exp.Column):
             alias_to_hash[expr.name] = h
 
+    # 捕获当前 HAVING + 内嵌子查询（恢复前）
+    current_having = ctx.pending_having
+    inner_sqs = list(ctx.inner_subqueries)
+    ctx.inner_subqueries.clear()
+
     # 恢复
     ctx.group_keys = saved_group_keys
     ctx.pending_where = saved_where
     ctx.pending_having = saved_having
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
+    if current_having:
+        structure["having"] = current_having
+    if inner_sqs:
+        structure["inner_subqueries"] = inner_sqs
 
     h = compute_hash(structure)
     ctx.upsert_subquery(h, "select", structure)

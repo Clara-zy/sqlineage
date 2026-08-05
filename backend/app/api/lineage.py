@@ -87,10 +87,13 @@ def graph(
                     having_h = struct.get("having")
                     if having_h and having_h not in reachable:
                         reachable.add(having_h)
-                    # UNION: 把 branches（子查询 hash）加入 sq_queue 继续展开
+                    # UNION branches + 内嵌子查询（FROM 子查询）
                     for branch_h in struct.get("branches", []):
                         if branch_h not in reachable:
                             sq_queue.append(branch_h)
+                    for inner_h in struct.get("inner_subqueries", []):
+                        if inner_h not in reachable:
+                            sq_queue.append(inner_h)
 
                 # BFS 沿 field_references 向下追溯
                 queue = list(reachable)
