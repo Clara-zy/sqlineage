@@ -19,7 +19,7 @@ class TestJoinWrap:
 
         with get_cursor() as cur:
             cur.execute(
-                "SELECT hash, expression FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT hash, expression FROM fields WHERE expression ->> 'op' = 'join'"
             )
             rows = cur.fetchall()
             # 右表字段(b.mchnt_nm)应有 JOIN 包装，左表字段(a.trans_id)不应
@@ -42,7 +42,7 @@ class TestJoinWrap:
             # 找到 trans_id 的非 atomic 节点（即 alias 对应的 inner）
             join_wrapped_trans_id = False
             for h, expr in all_exprs.items():
-                if expr.get("op") == "JOIN":
+                if expr.get("op") == "join":
                     # 检查 JOIN 的是哪个 atomic
                     args = expr.get("args", [])
                     for arg in args:
@@ -72,7 +72,7 @@ class TestValidation:
         with get_cursor() as cur:
             # 验证 JOIN 节点存在（a 列 2 层 + b 列 2 层 + c 列 1 层 = 5，加 ON 引用 = 6）
             cur.execute(
-                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'join'"
             )
             join_count = cur.fetchone()["count"]
             assert join_count >= 5
@@ -81,7 +81,7 @@ class TestValidation:
             cur.execute(
                 "SELECT f.hash FROM fields f "
                 "JOIN field_references fr ON fr.referrer_hash = f.hash "
-                "WHERE f.expression ->> 'op' = 'JOIN' "
+                "WHERE f.expression ->> 'op' = 'join' "
                 "AND jsonb_array_length(f.expression -> 'args') = 1"
             )
             join_nodes = cur.fetchall()
@@ -134,7 +134,7 @@ class TestRightJoin:
 
         with get_cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'join'"
             )
             join_count = cur.fetchone()["count"]
             # RIGHT→LEFT 后，右表是 trans_flow，应该有 JOIN 包装
@@ -156,7 +156,7 @@ class TestThreeTableJoin:
 
         with get_cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'join'"
             )
             join_count = cur.fetchone()["count"]
             # b.mchnt_nm 和 c.industry_nm 都应该有 JOIN 包装
@@ -177,7 +177,7 @@ class TestLateralView:
 
         with get_cursor() as cur:
             cur.execute(
-                "SELECT expression FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT expression FROM fields WHERE expression ->> 'op' = 'join'"
             )
             rows = cur.fetchall()
             has_lateral = False

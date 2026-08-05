@@ -569,7 +569,7 @@ def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
     for on_hash in on_hashes:
         if not on_hash:
             continue
-        join_expr = {"op": "JOIN", "args": [{"hash": result}], "on": on_hash}
+        join_expr = {"op": "join", "args": [{"hash": result}], "on": on_hash}
         new_h = compute_hash(join_expr)
         ctx.upsert_field(new_h, "expression", join_expr)
         ctx.upsert_field_reference(result, new_h)
@@ -579,7 +579,7 @@ def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
 
     # WHERE 在 JOIN 之后、聚合之前
     if ctx.pending_where and result:
-        where_expr = {"op": "WHERE", "args": [{"hash": result}], "condition": ctx.pending_where}
+        where_expr = {"op": "where", "args": [{"hash": result}], "condition": ctx.pending_where}
         new_h = compute_hash(where_expr)
         ctx.upsert_field(new_h, "expression", where_expr)
         ctx.upsert_field_reference(result, new_h)
@@ -667,7 +667,7 @@ def _resolve_lateral_column(alias: str, col_name: str, ctx: BuildContext) -> str
         raise MissingLineageData(f"LATERAL VIEW 别名 {alias} 未找到")
     lateral_node = sub_info["ast"]
     inner_h = build_field(lateral_node.this, ctx)
-    expression = {"op": "JOIN", "args": [{"hash": inner_h}], "on": None, "lateral": True}
+    expression = {"op": "join", "args": [{"hash": inner_h}], "on": None, "lateral": True}
     h = compute_hash(expression)
     ctx.upsert_field(h, "expression", expression)
     ctx.upsert_field_reference(inner_h, h)

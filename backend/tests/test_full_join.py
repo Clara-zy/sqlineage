@@ -33,7 +33,7 @@ class TestFullJoin:
 
             # 应有 JOIN 表达式（来自两个分支各自的 LEFT JOIN）
             cur.execute(
-                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT count(*) FROM fields WHERE expression ->> 'op' = 'join'"
             )
             join_count = cur.fetchone()["count"]
             # 两个分支各自有 LEFT JOIN，至少有一些 JOIN 表达式

@@ -28,7 +28,7 @@ def _summarize(expr: dict) -> str:
         return f"alias({expr.get('alias_name', '?')})"
     elif op == "literal":
         return f"'{expr.get('value', '')}'"
-    elif op == "JOIN":
+    elif op == "join":
         on_h = expr.get("on") or ""
         lateral = ", lateral" if expr.get("lateral") else ""
         return f"JOIN(on={str(on_h)[:8]}...{lateral})"
@@ -42,7 +42,7 @@ def _summarize(expr: dict) -> str:
         return f"{op}(...)"
     elif op == "casewhen":
         return "CASE WHEN ... END"
-    elif op == "WHERE":
+    elif op == "where":
         return "WHERE(...)"
     elif op == "current_timestamp":
         return "CURRENT_TIMESTAMP"

@@ -65,7 +65,7 @@ class TestEnumInherit:
 
         with get_cursor() as cur:
             cur.execute(
-                "SELECT hash FROM fields WHERE expression ->> 'op' = 'JOIN'"
+                "SELECT hash FROM fields WHERE expression ->> 'op' = 'join'"
             )
             rows = cur.fetchall()
             assert len(rows) >= 2

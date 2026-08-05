@@ -300,9 +300,9 @@ def _node_label(field_type: str, expr: dict) -> str:
         return "*"
     elif op == "casewhen":
         return "CASE WHEN"
-    elif op in ("JOIN",):
+    elif op == "join":
         return "JOIN(...)"
-    elif op == "WHERE":
+    elif op == "where":
         return "WHERE(...)"
     elif op == "subquery":
         return "SUBQUERY"
