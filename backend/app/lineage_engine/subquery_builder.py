@@ -61,9 +61,11 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     ctx.pending_where = saved_where
     ctx.pending_having = saved_having
 
-    structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
+    # HAVING 条件 hash 加入 fields，使其作为 field 节点通过 DAG 可达
     if current_having:
-        structure["having"] = current_having
+        field_hashes.append(current_having)
+
+    structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
     if inner_sqs:
         structure["inner_subqueries"] = inner_sqs
 
