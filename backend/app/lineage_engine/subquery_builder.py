@@ -4,12 +4,15 @@ import sqlglot.expressions as exp
 
 from app.lineage_engine.context import BuildContext, compute_hash
 from app.lineage_engine.field_builder import build_field
+from app.database import get_cursor
+import json
 
 
 def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dict]:
     """构建 SELECT 子查询节点 → (hash, alias_to_hash)
 
     WHERE 在列引用层应用（_maybe_wrap_join），位于 JOIN 之后、聚合之前。
+    HAVING 在聚合后，作为子查询级过滤存入 structure。
     """
     from app.lineage_engine.field_builder import build_alias_map
     build_alias_map(node, ctx)
@@ -28,7 +31,16 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         for key_expr in (group_expr.expressions if hasattr(group_expr, "expressions") else []):
             ctx.group_keys.append(build_field(key_expr, ctx))
 
-    # 3. 构建投影列（列引用层已带 WHERE + JOIN）
+    # 3. 构建 HAVING — 存入 ctx.pending_having，并显式创建 having 包裹节点
+    saved_having = ctx.pending_having
+    ctx.pending_having = None
+    if node.args.get("having"):
+        having_cond = build_field(node.args["having"], ctx)
+        ctx.pending_having = having_cond
+        # 显式创建 having 节点包裹 HAVING 条件引用的 groupby 聚合
+        _wrap_having_on_groupbys(having_cond, ctx)
+
+    # 4. 构建投影列（WHERE/JOIN/HAVING 均已在对应层级自动应用）
     field_hashes = []
     alias_to_hash = {}
     for expr in node.expressions:
@@ -42,6 +54,7 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     # 恢复
     ctx.group_keys = saved_group_keys
     ctx.pending_where = saved_where
+    ctx.pending_having = saved_having
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
 
@@ -70,3 +83,53 @@ def build_subquery_union(node: exp.Union, ctx: BuildContext) -> str:
     h = compute_hash(structure)
     ctx.upsert_subquery(h, "union", structure)
     return h
+
+
+def _wrap_having_on_groupbys(having_cond: str, ctx: BuildContext):
+    """遍历 HAVING 条件引用的 groupby 节点，为每个创建 having 包裹。
+    HAVING 条件内部聚合已 groupby-wrapped（ctx.group_keys 已设置），
+    此处在其上再包一层 having 节点指向 HAVING 条件。
+    """
+    from app.field_enums import inherit_enum
+
+    visited: set[str] = set()
+    queue = [having_cond]
+
+    while queue:
+        fh = queue.pop(0)
+        if fh in visited:
+            continue
+        visited.add(fh)
+
+        with get_cursor() as cur:
+            cur.execute("SELECT expression FROM fields WHERE hash = %s", (fh,))
+            row = cur.fetchone()
+            if not row:
+                continue
+            expr = row["expression"]
+            if isinstance(expr, str):
+                expr = json.loads(expr)
+
+            # 收集子引用
+            for a in expr.get("args", []):
+                sub_h = a.get("hash", "")
+                if sub_h and sub_h not in visited:
+                    queue.append(sub_h)
+
+        # 对 groupby 节点创建 having 包裹
+        if expr.get("op") == "groupby":
+            having_expr = {"op": "having", "args": [{"hash": fh}], "condition": having_cond}
+            new_h = compute_hash(having_expr)
+            ctx.upsert_field(new_h, "expression", having_expr)
+            with get_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO field_references (referenced_hash, referrer_hash) "
+                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (fh, new_h),
+                )
+                cur.execute(
+                    "INSERT INTO field_references (referenced_hash, referrer_hash) "
+                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (having_cond, new_h),
+                )
+            inherit_enum(fh, new_h)

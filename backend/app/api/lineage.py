@@ -304,6 +304,8 @@ def _node_label(field_type: str, expr: dict) -> str:
         return "JOIN(...)"
     elif op == "where":
         return "WHERE(...)"
+    elif op == "having":
+        return "HAVING(...)"
     elif op == "subquery":
         return "SUBQUERY"
     elif op == "current_timestamp":
