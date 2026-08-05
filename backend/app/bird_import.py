@@ -8,7 +8,6 @@
 
 import json
 import os
-import re
 import sys
 
 from app.database import get_cursor
@@ -26,10 +25,7 @@ def preprocess_sql(sql: str) -> str | None:
     # 1. 去掉反引号（`order` → order）
     sql = sql.replace("`", "")
 
-    # 2. 去掉 LIMIT 子句（含子查询中的 LIMIT）
-    sql = re.sub(r"\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?", "", sql, flags=re.IGNORECASE)
-
-    # 3. 标识符归一化为小写（兼容 BIRD SQL 的混合大小写）
+    # 2. 标识符归一化为小写（兼容 BIRD SQL 的混合大小写）
     #    不处理字符串字面量内部，BIRD 数据集中不存在冲突
     sql = _lowercase_identifiers(sql)
 
@@ -92,17 +88,13 @@ def main():
             errors["CURRENT_TIMESTAMP"] = errors.get("CURRENT_TIMESTAMP", 0) + 1
             continue
 
-        # 如果去掉了 LIMIT 但 SQL 没变 → 原本就没有 LIMIT
-        had_limit = (processed != sql.replace("`", ""))
-
         comment = f"[BIRD] {db_id}/{difficulty} Q{qid}: {question[:50]}"
 
         try:
             result = build_lineage(processed, comment=comment)
             new_f = result.get("new_fields", 0)
             new_sq = result.get("new_subqueries", 0)
-            limit_tag = " (已去LIMIT)" if had_limit and "LIMIT" in sql.upper() else ""
-            print(f"  ✓ Q{qid:<4} [{difficulty:<11}] {question[:45]}...{limit_tag}")
+            print(f"  ✓ Q{qid:<4} [{difficulty:<11}] {question[:45]}...")
             if new_f > 0 or new_sq > 0:
                 print(f"        +{new_f}字段 +{new_sq}SQ")
             success += 1

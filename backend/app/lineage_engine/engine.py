@@ -7,7 +7,6 @@ from app.database import get_cursor
 from app.lineage_engine.context import BuildContext
 from app.lineage_engine.validators import (
     ValidationError,
-    validate_no_limit,
     validate_join_rules,
     validate_tables_exist,
 )
@@ -19,7 +18,6 @@ from app.lineage_engine.subquery_builder import build_subquery_select
 def build_lineage(sql: str, sink_table: str | None = None, comment: str | None = None) -> dict:
     """完整血缘构建流程"""
     # Phase 0: 入参校验
-    validate_no_limit(sql)
     ast = sqlglot.parse_one(sql)
 
     ctx = BuildContext()

@@ -46,6 +46,8 @@ def _summarize(expr: dict) -> str:
         return "WHERE(...)"
     elif op == "having":
         return "HAVING(...)"
+    elif op == "limt":
+        return f"LIMIT({expr.get('limit', '?')})"
     elif op == "current_timestamp":
         return "CURRENT_TIMESTAMP"
     elif op == "star":

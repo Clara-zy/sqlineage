@@ -46,7 +46,7 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         elif isinstance(expr, exp.Column):
             alias_to_hash[expr.name] = h
 
-    # 5. HAVING 包裹每个投影列（类似 WHERE 包裹列引用）
+    # 5. HAVING 包裹每个投影列
     current_having = ctx.pending_having
     if current_having:
         from app.field_enums import inherit_enum
@@ -61,6 +61,31 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
             wrapped.append(wh)
         field_hashes = wrapped
 
+    # 6. ORDER BY — 构建 sort key field 节点
+    order_keys = []
+    order_expr = node.args.get("order")
+    if order_expr:
+        for o in (order_expr.expressions if hasattr(order_expr, "expressions") else []):
+            key_h = build_field(o, ctx)
+            desc = bool(o.args.get("desc"))
+            order_keys.append({"hash": key_h, "desc": desc})
+
+    # 7. LIMIT 包裹每个投影列
+    limit_val = None
+    limit_node = node.args.get("limit")
+    if limit_node:
+        limit_val = int(limit_node.expression.this) if limit_node.expression else 0
+        from app.field_enums import inherit_enum
+        wrapped = []
+        for fh in field_hashes:
+            lim_expr = {"op": "limt", "args": [{"hash": fh}], "limit": limit_val}
+            lh = compute_hash(lim_expr)
+            ctx.upsert_field(lh, "expression", lim_expr)
+            ctx.upsert_field_reference(fh, lh)
+            inherit_enum(fh, lh)
+            wrapped.append(lh)
+        field_hashes = wrapped
+
     inner_sqs = list(ctx.inner_subqueries)
     ctx.inner_subqueries.clear()
 
@@ -70,6 +95,10 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     ctx.pending_having = saved_having
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
+    if order_keys:
+        structure["order_by"] = order_keys
+    if limit_val is not None:
+        structure["limit"] = limit_val
     if inner_sqs:
         structure["inner_subqueries"] = inner_sqs
 

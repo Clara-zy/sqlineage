@@ -42,10 +42,14 @@ class TestLayer0:
 
         assert hash1 == hash2
 
-    def test_limit_rejected(self, clean_db):
-        with pytest.raises(ValidationError) as exc:
-            build_lineage("SELECT trans_id FROM trans_flow LIMIT 10")
-        assert exc.value.code == 49001
+    def test_limit_accepted(self, clean_db):
+        """LIMIT 不再拒绝，作为 limt 节点包裹投影列"""
+        from app.database import get_cursor
+        r = build_lineage("SELECT trans_id FROM trans_flow LIMIT 10")
+        assert r["new_fields"] >= 0
+        with get_cursor() as cur:
+            cur.execute("SELECT count(*) FROM fields WHERE expression ->> 'op' = 'limt'")
+            assert cur.fetchone()["count"] >= 1
 
     def test_unknown_table_rejected(self, clean_db):
         with pytest.raises(ValidationError) as exc:

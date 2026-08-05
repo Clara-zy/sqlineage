@@ -12,28 +12,6 @@ class ValidationError(Exception):
 
 # ── 校验函数 ──
 
-def validate_no_limit(sql: str):
-    """扫描 SQL 中是否包含 LIMIT 关键字"""
-    try:
-        ast = sqlglot.parse_one(sql)
-    except Exception:
-        raise ValidationError(49001, "SQL 语法错误，无法解析")
-    _check_no_limit(ast)
-
-
-def _check_no_limit(node: exp.Expression):
-    if isinstance(node, exp.Limit):
-        raise ValidationError(49001, "SQL 中包含 LIMIT，禁止入血缘")
-    if isinstance(node, exp.Select):
-        for child_node in node.walk():
-            if isinstance(child_node, exp.Limit):
-                raise ValidationError(49001, "SQL 中包含 LIMIT，禁止入血缘")
-    ctes = node.args.get("with")
-    if ctes:
-        for cte in (ctes.expressions or []):
-            _check_no_limit(cte.this)
-
-
 def validate_join_rules(ast: exp.Expression):
     """
     校验 JOIN 规范。
