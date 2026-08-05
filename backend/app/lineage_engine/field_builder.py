@@ -191,7 +191,7 @@ def _extract_args(node: exp.Expression, ctx: BuildContext) -> tuple[list[str], d
 
 
 def _wrap_groupby(agg_hash: str, agg_children: list[str], ctx: BuildContext) -> str:
-    """将聚合函数包装为 groupby(agg, keys=[...])，再叠加 HAVING"""
+    """将聚合函数包装为 groupby(agg, keys=[...])"""
     group_keys = ctx.group_keys
     expression = {
         "op": "groupby",
@@ -203,18 +203,6 @@ def _wrap_groupby(agg_hash: str, agg_children: list[str], ctx: BuildContext) -> 
     ctx.upsert_field_reference(agg_hash, h)
     for gk in group_keys:
         ctx.upsert_field_reference(gk, h)
-
-    # HAVING 在 groupby 之后包裹
-    if ctx.pending_having:
-        having_expr = {"op": "having", "args": [{"hash": h}], "condition": ctx.pending_having}
-        new_h = compute_hash(having_expr)
-        ctx.upsert_field(new_h, "expression", having_expr)
-        ctx.upsert_field_reference(h, new_h)
-        ctx.upsert_field_reference(ctx.pending_having, new_h)
-        from app.field_enums import inherit_enum
-        inherit_enum(h, new_h)
-        h = new_h
-
     return h
 
 
