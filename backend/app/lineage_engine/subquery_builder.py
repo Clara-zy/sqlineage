@@ -46,7 +46,11 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         elif isinstance(expr, exp.Column):
             alias_to_hash[expr.name] = h
 
-    # 5. HAVING 包裹每个投影列
+    # 5. 记录投影别名 → hash（ORDER BY 中引用 SELECT 别名时需要）
+    saved_proj = ctx.projection_map
+    ctx.projection_map = dict(alias_to_hash)
+
+    # 6. HAVING 包裹每个投影列
     current_having = ctx.pending_having
     if current_having:
         from app.field_enums import inherit_enum
@@ -104,6 +108,7 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     ctx.group_keys = saved_group_keys
     ctx.pending_where = saved_where
     ctx.pending_having = saved_having
+    ctx.projection_map = saved_proj
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
     if order_hashes:

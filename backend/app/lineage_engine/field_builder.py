@@ -436,6 +436,9 @@ def build_column(node: exp.Column, ctx: BuildContext) -> str:
     col_name = node.name
     table_ident = node.table
     if not table_ident:
+        # 无表前缀 → 尝试从投影别名解析（ORDER BY 中引用 SELECT 别名）
+        if col_name in ctx.projection_map:
+            return ctx.projection_map[col_name]
         raise UnsupportedExpression(f"无法解析列 {col_name} 的来源表")
 
     table_name = table_ident if isinstance(table_ident, str) else table_ident.name
@@ -519,15 +522,37 @@ def build_star(node: exp.Star, ctx: BuildContext) -> str:
 
 def build_subquery(node: exp.Subquery, ctx: BuildContext) -> str:
     """处理表达式中的子查询 (如 WHERE x IN (SELECT ...))
-    创建包装 field 节点表示子查询结果，避免 field_references FK 约束冲突。
+    创建包装 field 节点，subquery_hash 指向子查询，column_hash 连接投影列到 DAG。
     """
     from app.lineage_engine.subquery_builder import build_subquery_select
+    from app.database import get_cursor
+    import json as _json
+
     inner = node.this
     if isinstance(inner, exp.Select):
         sq_hash, _ = build_subquery_select(inner, ctx)
+
+        # 取子查询第一个投影列的 hash，桥接到 DAG
+        col_hash = None
+        with get_cursor() as cur:
+            cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_hash,))
+            row = cur.fetchone()
+            if row:
+                s = row["structure"]
+                if isinstance(s, str):
+                    s = _json.loads(s)
+                fields = s.get("fields", [])
+                if fields:
+                    col_hash = fields[0]
+
         expression = {"op": "subquery", "subquery_hash": sq_hash}
+        if col_hash:
+            expression["column_hash"] = col_hash
+
         h = compute_hash(expression)
         ctx.upsert_field(h, "expression", expression)
+        if col_hash:
+            ctx.upsert_field_reference(col_hash, h)
         return h
     raise UnsupportedExpression(f"不支持的子查询类型: {type(inner).__name__}")
 
