@@ -47,7 +47,9 @@ def _summarize(expr: dict) -> str:
     elif op == "having":
         return "HAVING(...)"
     elif op == "limt":
-        return f"LIMIT({expr.get('limit', '?')})"
+        n = expr.get('limit', '?')
+        order = ', ORDER' if expr.get('order_by') else ''
+        return f"LIMIT({n}{order})"
     elif op == "current_timestamp":
         return "CURRENT_TIMESTAMP"
     elif op == "star":

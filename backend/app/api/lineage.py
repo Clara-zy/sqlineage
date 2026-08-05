@@ -315,8 +315,6 @@ def _node_label(field_type: str, expr: dict) -> str:
         return "HAVING(...)"
     elif op == "limt":
         return "LIMIT(...)"
-    elif op == "ordr":
-        return "ORDER BY"
     elif op == "subquery":
         return "SUBQUERY"
     elif op == "current_timestamp":
