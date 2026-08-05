@@ -21,6 +21,7 @@ class BuildContext:
         self.subquery_map: dict[str, dict] = {}  # 子查询别名 → {ast, projection_hashes}
         self.join_wraps: dict[str, list[str]] = {}  # 别名 → [on_hash, ...] 栈式包裹
         self.group_keys: list[str] = []  # 当前子查询的 GROUP BY 字段 hash 列表
+        self.pending_where: str | None = None  # 当前子查询的 WHERE hash，列引用时应用
 
     # ── 表结构查询 ──
 

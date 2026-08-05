@@ -561,12 +561,10 @@ def build_in(node: exp.In, ctx: BuildContext) -> str:
 
 
 def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
-    """按 join_wraps[alias] 栈逐层包裹 JOIN 表达式"""
+    """按 join_wraps[alias] 栈逐层包裹 JOIN，最后包 WHERE（列引用层）"""
     on_hashes = ctx.join_wraps.get(alias, [])
-    if not on_hashes or not inner_hash:
-        return inner_hash
-
     from app.field_enums import inherit_enum
+
     result = inner_hash
     for on_hash in on_hashes:
         if not on_hash:
@@ -578,6 +576,17 @@ def _maybe_wrap_join(inner_hash: str, alias: str, ctx: BuildContext) -> str:
         ctx.upsert_field_reference(on_hash, new_h)
         inherit_enum(result, new_h)
         result = new_h
+
+    # WHERE 在 JOIN 之后、聚合之前
+    if ctx.pending_where and result:
+        where_expr = {"op": "WHERE", "args": [{"hash": result}], "condition": ctx.pending_where}
+        new_h = compute_hash(where_expr)
+        ctx.upsert_field(new_h, "expression", where_expr)
+        ctx.upsert_field_reference(result, new_h)
+        ctx.upsert_field_reference(ctx.pending_where, new_h)
+        inherit_enum(result, new_h)
+        result = new_h
+
     return result
 
 

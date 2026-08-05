@@ -7,11 +7,20 @@ from app.lineage_engine.field_builder import build_field
 
 
 def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dict]:
-    """构建 SELECT 子查询节点 → (hash, alias_to_hash)"""
+    """构建 SELECT 子查询节点 → (hash, alias_to_hash)
+
+    WHERE 在列引用层应用（_maybe_wrap_join），位于 JOIN 之后、聚合之前。
+    """
     from app.lineage_engine.field_builder import build_alias_map
     build_alias_map(node, ctx)
 
-    # 先构建 GROUP BY 字段 hash（聚合函数包装时需要）
+    # 1. 构建 WHERE，存入 ctx.pending_where（列引用时自动应用）
+    saved_where = ctx.pending_where
+    ctx.pending_where = None
+    if node.args.get("where"):
+        ctx.pending_where = build_field(node.args["where"], ctx)
+
+    # 2. 构建 GROUP BY 字段 hash（列引用层已带 WHERE）
     saved_group_keys = ctx.group_keys
     ctx.group_keys = []
     group_expr = node.args.get("group")
@@ -19,7 +28,7 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         for key_expr in (group_expr.expressions if hasattr(group_expr, "expressions") else []):
             ctx.group_keys.append(build_field(key_expr, ctx))
 
-    # 遍历 projection 构建字段 hash，同时记录 alias→hash 映射
+    # 3. 构建投影列（列引用层已带 WHERE + JOIN）
     field_hashes = []
     alias_to_hash = {}
     for expr in node.expressions:
@@ -30,26 +39,9 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
         elif isinstance(expr, exp.Column):
             alias_to_hash[expr.name] = h
 
-    # 恢复 group_keys
+    # 恢复
     ctx.group_keys = saved_group_keys
-
-    # 构建 WHERE，并对每个投影列包裹 WHERE(field, condition=where_hash)
-    where_hash = None
-    if node.args.get("where"):
-        where_hash = build_field(node.args["where"], ctx)
-
-    if where_hash:
-        from app.field_enums import inherit_enum
-        wrapped = []
-        for fh in field_hashes:
-            where_expr = {"op": "WHERE", "args": [{"hash": fh}], "condition": where_hash}
-            wh = compute_hash(where_expr)
-            ctx.upsert_field(wh, "expression", where_expr)
-            ctx.upsert_field_reference(fh, wh)
-            ctx.upsert_field_reference(where_hash, wh)
-            inherit_enum(fh, wh)
-            wrapped.append(wh)
-        field_hashes = wrapped
+    ctx.pending_where = saved_where
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
 
