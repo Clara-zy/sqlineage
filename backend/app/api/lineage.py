@@ -87,8 +87,7 @@ def graph(
                     for branch_h in struct.get("branches", []):
                         if branch_h not in reachable:
                             sq_queue.append(branch_h)
-                    for ok in struct.get("order_by", []):
-                        ok_h = ok.get("hash", "")
+                    for ok_h in struct.get("order_by", []):
                         if ok_h and ok_h not in reachable:
                             reachable.add(ok_h)
                     for inner_h in struct.get("inner_subqueries", []):
@@ -315,6 +314,8 @@ def _node_label(field_type: str, expr: dict) -> str:
         return "HAVING(...)"
     elif op == "limt":
         return "LIMIT(...)"
+    elif op == "ordr":
+        return "ORDER BY"
     elif op == "subquery":
         return "SUBQUERY"
     elif op == "current_timestamp":

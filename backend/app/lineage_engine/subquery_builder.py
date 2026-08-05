@@ -61,33 +61,38 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
             wrapped.append(wh)
         field_hashes = wrapped
 
-    # 6. ORDER BY — sort key 作为 field，hash 存入 order_keys（供 LIMIT 引用）
-    order_keys = []
+    # 6. ORDER BY — 独立 ordr 节点包裹 sort key，供 LIMIT 引用
+    order_hashes = []
     order_expr = node.args.get("order")
     if order_expr:
         for o in (order_expr.expressions if hasattr(order_expr, "expressions") else []):
             key_h = build_field(o, ctx)
             desc = bool(o.args.get("desc"))
-            order_keys.append({"hash": key_h, "desc": desc})
+            ordr_expr = {"op": "ordr", "args": [{"hash": key_h}], "desc": desc}
+            oh = compute_hash(ordr_expr)
+            ctx.upsert_field(oh, "expression", ordr_expr)
+            ctx.upsert_field_reference(key_h, oh)
+            order_hashes.append(oh)
 
-    # 7. LIMIT 包裹每个投影列，ORDER BY 作为 limt 的可选参数
+    # 7. LIMIT 包裹投影列，引用 ORDER BY 的 ordr 节点
     limit_val = None
     limit_node = node.args.get("limit")
-    if limit_node or order_keys:
-        limit_val = int(limit_node.expression.this) if (limit_node and limit_node.expression) else None
+    if limit_node:
+        limit_val = int(limit_node.expression.this) if limit_node.expression else 0
+    if limit_node or order_hashes:
         from app.field_enums import inherit_enum
         wrapped = []
         for fh in field_hashes:
             lim_expr = {"op": "limt", "args": [{"hash": fh}]}
-            if limit_val is not None:
+            if limit_val is not None and limit_node:
                 lim_expr["limit"] = limit_val
-            if order_keys:
-                lim_expr["order_by"] = [{"hash": ok["hash"], "desc": ok["desc"]} for ok in order_keys]
+            if order_hashes:
+                lim_expr["order_by"] = [oh for oh in order_hashes]
             lh = compute_hash(lim_expr)
             ctx.upsert_field(lh, "expression", lim_expr)
             ctx.upsert_field_reference(fh, lh)
-            for ok in order_keys:
-                ctx.upsert_field_reference(ok["hash"], lh)
+            for oh in order_hashes:
+                ctx.upsert_field_reference(oh, lh)
             inherit_enum(fh, lh)
             wrapped.append(lh)
         field_hashes = wrapped
@@ -101,8 +106,8 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     ctx.pending_having = saved_having
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
-    if order_keys:
-        structure["order_by"] = order_keys
+    if order_hashes:
+        structure["order_by"] = [oh for oh in order_hashes]
     if limit_val is not None:
         structure["limit"] = limit_val
     if inner_sqs:
