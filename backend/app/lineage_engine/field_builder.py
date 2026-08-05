@@ -522,7 +522,8 @@ def build_star(node: exp.Star, ctx: BuildContext) -> str:
 
 def build_subquery(node: exp.Subquery, ctx: BuildContext) -> str:
     """处理表达式中的子查询 (如 WHERE x IN (SELECT ...))
-    创建包装 field 节点，subquery_hash 指向子查询，column_hash 连接投影列到 DAG。
+    直接返回子查询投影列的 hash，不创建中间 field 节点。
+    子查询的 inner_subqueries 已由 build_subquery_select 记录在 structure 中。
     """
     from app.lineage_engine.subquery_builder import build_subquery_select
     from app.database import get_cursor
@@ -531,9 +532,8 @@ def build_subquery(node: exp.Subquery, ctx: BuildContext) -> str:
     inner = node.this
     if isinstance(inner, exp.Select):
         sq_hash, _ = build_subquery_select(inner, ctx)
+        ctx.inner_subqueries.append(sq_hash)
 
-        # 取子查询第一个投影列的 hash，桥接到 DAG
-        col_hash = None
         with get_cursor() as cur:
             cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_hash,))
             row = cur.fetchone()
@@ -543,17 +543,9 @@ def build_subquery(node: exp.Subquery, ctx: BuildContext) -> str:
                     s = _json.loads(s)
                 fields = s.get("fields", [])
                 if fields:
-                    col_hash = fields[0]
+                    return fields[0]
 
-        expression = {"op": "subquery", "subquery_hash": sq_hash}
-        if col_hash:
-            expression["column_hash"] = col_hash
-
-        h = compute_hash(expression)
-        ctx.upsert_field(h, "expression", expression)
-        if col_hash:
-            ctx.upsert_field_reference(col_hash, h)
-        return h
+        raise MissingLineageData(f"子查询 {sq_hash[:8]} 无投影列")
     raise UnsupportedExpression(f"不支持的子查询类型: {type(inner).__name__}")
 
 
