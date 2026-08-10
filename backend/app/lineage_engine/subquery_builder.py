@@ -111,10 +111,6 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     ctx.projection_map = saved_proj
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
-    if order_hashes:
-        structure["order_by"] = [oh for oh in order_hashes]
-    if limit_val is not None:
-        structure["limit"] = limit_val
     if inner_sqs:
         structure["inner_subqueries"] = inner_sqs
 

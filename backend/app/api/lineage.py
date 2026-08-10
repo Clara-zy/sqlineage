@@ -83,13 +83,10 @@ def graph(
                     for fh in struct.get("fields", []):
                         if fh not in reachable:
                             reachable.add(fh)
-                    # UNION branches + ORDER BY keys + 内嵌子查询
+                    # UNION branches + 内嵌子查询
                     for branch_h in struct.get("branches", []):
                         if branch_h not in reachable:
                             sq_queue.append(branch_h)
-                    for ok_h in struct.get("order_by", []):
-                        if ok_h and ok_h not in reachable:
-                            reachable.add(ok_h)
                     for inner_h in struct.get("inner_subqueries", []):
                         if inner_h not in reachable:
                             sq_queue.append(inner_h)
