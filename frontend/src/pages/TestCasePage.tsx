@@ -381,6 +381,7 @@ export default function TestCasePage() {
           </div>
           <SidePanel
             detail={nodeDetail}
+            queryId={selectedIds.size > 0 ? Array.from(selectedIds)[0] : undefined}
             onClose={() => { setSelectedHash(null); setNodeDetail(null) }}
           />
         </div>

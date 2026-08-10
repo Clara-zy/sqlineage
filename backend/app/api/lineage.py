@@ -454,6 +454,34 @@ def _extract_on_column_pairs(
     return pairs
 
 
+@router.get("/field-sql/{hash}")
+def field_sql(
+    hash: str,
+    query_id: int | None = None,
+    user: dict = Depends(get_current_user),
+):
+    """将单个字段节点还原为最小完整 SQL。
+
+    query_id 可选：限制仅在该测例的子查询范围内追溯结构包裹。
+    """
+    from app.sql_reconstructor import field_to_sql_full
+    try:
+        sq_hash = None
+        if query_id:
+            with get_cursor() as cur:
+                cur.execute(
+                    "SELECT subquery_hash FROM build_history WHERE id = %s",
+                    (query_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    sq_hash = row["subquery_hash"]
+        sql = field_to_sql_full(hash, sq_hash)
+        return {"code": 0, "data": {"hash": hash, "sql": sql}, "message": "ok"}
+    except Exception as e:
+        return {"code": 500, "data": None, "message": str(e)}
+
+
 @router.get("/node/{hash}")
 def node_detail(hash: str, user: dict = Depends(get_current_user)):
     """获取单个节点详情（含上下游）"""
