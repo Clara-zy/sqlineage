@@ -20,6 +20,7 @@ class BuildContext:
         self.alias_map: dict[str, str] = {}  # 表别名 → 真实表名
         self.subquery_map: dict[str, dict] = {}  # 子查询别名 → {ast, projection_hashes}
         self.join_wraps: dict[str, list[str]] = {}  # 别名 → [on_hash, ...] 栈式包裹
+        self.from_alias: str | None = None  # FROM 表别名（star 节点继承其 JOIN+WHERE 包裹）
         self.group_keys: list[str] = []  # 当前子查询的 GROUP BY 字段 hash 列表
         self.pending_where: str | None = None  # 当前子查询的 WHERE hash，列引用时应用
         self.pending_having: str | None = None  # 当前子查询的 HAVING hash，聚合后应用

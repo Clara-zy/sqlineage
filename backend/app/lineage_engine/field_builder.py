@@ -41,6 +41,16 @@ def build_field(node: exp.Expression, ctx: BuildContext) -> str:
         result = build_case_when(node, ctx)
     elif isinstance(node, exp.Alias):
         result = build_alias(node, ctx)
+    elif isinstance(node, exp.Count):
+        # count(<literal>) → count(*)，star 继承 FROM 表名
+        this = node.args.get("this")
+        if isinstance(this, exp.Literal):
+            from_alias = ctx.from_alias
+            star = exp.Star()
+            if from_alias:
+                star.set("table", exp.Table(this=exp.Identifier(this=from_alias)))
+            node.set("this", star)
+        result = build_function(node, ctx)
     elif isinstance(node, (
         exp.Anonymous, exp.Coalesce, exp.Concat,
         exp.Round, exp.Abs, exp.Ceil, exp.Floor,
@@ -364,12 +374,14 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
                 left_aliases.add(key)
                 all_aliases.add(key)
                 join_wraps.setdefault(key, [])
+                ctx.from_alias = key
         elif isinstance(from_src, (exp.Select, exp.Subquery)):
             key = _reg_subquery(from_src, from_src.alias)
             if key:
                 left_aliases.add(key)
                 all_aliases.add(key)
                 join_wraps.setdefault(key, [])
+                ctx.from_alias = key
 
     # LATERAL VIEW
     for node in select_ast.walk():
@@ -514,9 +526,23 @@ def build_cast(node: exp.Cast, ctx: BuildContext) -> str:
 
 
 def build_star(node: exp.Star, ctx: BuildContext) -> str:
-    expression = {"op": "star"}
+    # 表名优先取 Star 自带 qualifier，否则用 FROM 表（均解析为原表名）
+    star_table = node.args.get("table")
+    if star_table and hasattr(star_table, "name") and star_table.name:
+        raw = star_table.name if isinstance(star_table.name, str) else star_table.name.name
+    else:
+        raw = ctx.from_alias or ""
+    # 别名 → 原表名
+    table_name = ctx.alias_map.get(raw, raw)
+
+    expression = {"op": "star", "table": table_name}
     h = compute_hash(expression)
     ctx.upsert_field(h, "literal", expression)
+
+    # star 继承 FROM 表的 JOIN+WHERE 包裹
+    alias = ctx.from_alias or table_name
+    if alias:
+        return _maybe_wrap_join(h, alias, ctx)
     return h
 
 
