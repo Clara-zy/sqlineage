@@ -9,6 +9,7 @@ interface NodeDetail {
 const TYPE_COLORS: Record<string, string> = {
   atomic: '#22c55e', literal: '#94a3b8', expression: '#3b82f6',
   atomic_condition: '#eab308', composite_condition: '#f97316',
+  table: '#3b82f6',
 }
 
 export default function SidePanel({
@@ -42,12 +43,35 @@ export default function SidePanel({
             {detail.field_type}
           </span>
         </div>
-        <div>
-          <div className="text-gray-400 mb-1">表达式</div>
-          <pre className="bg-gray-50 rounded p-2 font-mono text-gray-700 overflow-auto max-h-40">
-            {JSON.stringify(detail.expression, null, 2)}
-          </pre>
-        </div>
+        {/* 表节点：展示列结构 */}
+        {detail.field_type === 'table' && detail.expression.columns && (
+          <div>
+            <div className="text-gray-400 mb-1">
+              列结构 ({detail.expression.columns.length})
+            </div>
+            <div className="space-y-0.5 max-h-60 overflow-auto">
+              {detail.expression.columns.map((col: any) => (
+                <div
+                  key={col.name}
+                  className="flex items-center gap-2 px-2 py-1 bg-gray-50 rounded"
+                >
+                  <span className="font-mono text-gray-700">{col.name}</span>
+                  <span className="text-gray-400 ml-auto">{col.type}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 非表节点：显示 JSON 表达式 */}
+        {detail.field_type !== 'table' && (
+          <div>
+            <div className="text-gray-400 mb-1">表达式</div>
+            <pre className="bg-gray-50 rounded p-2 font-mono text-gray-700 overflow-auto max-h-40">
+              {JSON.stringify(detail.expression, null, 2)}
+            </pre>
+          </div>
+        )}
 
         {/* 上游 */}
         {detail.upstream.length > 0 && (

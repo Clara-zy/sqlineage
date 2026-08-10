@@ -42,7 +42,23 @@ function FieldNode({ data }: NodeProps) {
   )
 }
 
-const nodeTypes = { fieldNode: FieldNode }
+function TableNode({ data }: NodeProps) {
+  const d = data as any
+  return (
+    <div
+      className="rounded-lg border-2 px-3 py-2 text-xs shadow-sm bg-blue-50 min-w-[130px]"
+      style={{ borderColor: '#3b82f6' }}
+    >
+      <Handle type="target" position={Position.Top} />
+      <div className="text-gray-400 text-xs">{d.db_name || '—'}</div>
+      <div className="font-medium text-gray-800">{d.table_name}</div>
+      <div className="text-gray-400 mt-0.5">表</div>
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  )
+}
+
+const nodeTypes = { fieldNode: FieldNode, tableNode: TableNode }
 
 /* ── elkjs 布局 ── */
 const elk = new ELK()
@@ -97,6 +113,7 @@ export default function TestCasePage() {
   const [tagFilter, setTagFilter] = useState('')
   const [detailQuery, setDetailQuery] = useState<any>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [viewMode, setViewMode] = useState<'field' | 'table'>('field')
 
   const apiHeaders = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -110,18 +127,27 @@ export default function TestCasePage() {
       setEdges([])
       return
     }
-    const url = '/api/v1/lineage/graph?query_ids=' + ids.join(',')
+    const endpoint = viewMode === 'table' ? '/api/v1/lineage/overview' : '/api/v1/lineage/graph'
+    const url = endpoint + '?query_ids=' + ids.join(',')
     const res = await fetch(url, { headers: apiHeaders })
     const json = await res.json()
     if (json.code === 0 && json.data.nodes.length > 0) {
       const laidOut = await autoLayout(json.data.nodes, json.data.edges)
+      // 表级视图：给边加标签样式
+      const styledEdges = json.data.edges.map((e: any) => ({
+        ...e,
+        labelStyle: { fill: '#6b7280', fontSize: 10, fontWeight: 500 },
+        labelBgStyle: { fill: '#f9fafb', fillOpacity: 0.9 },
+        labelBgPadding: [4, 2] as [number, number],
+        labelBgBorderRadius: 2,
+      }))
       setNodes(laidOut)
-      setEdges(json.data.edges)
+      setEdges(styledEdges)
     } else {
       setNodes([])
       setEdges([])
     }
-  }, [apiHeaders, setNodes, setEdges])
+  }, [apiHeaders, setNodes, setEdges, viewMode])
 
   /* ── 加载历史 ── */
   useEffect(() => {
@@ -174,9 +200,19 @@ export default function TestCasePage() {
   /* ── 节点点击 ── */
   const onNodeClick = useCallback(async (_: any, node: any) => {
     setSelectedHash(node.id)
-    const res = await fetch(`/api/v1/lineage/node/${node.id}`, { headers: apiHeaders })
-    const json = await res.json()
-    if (json.code === 0) setNodeDetail(json.data)
+    if (node.type === 'tableNode') {
+      setNodeDetail({
+        hash: node.id,
+        field_type: 'table',
+        expression: node.data,
+        upstream: [],
+        downstream: [],
+      })
+    } else {
+      const res = await fetch(`/api/v1/lineage/node/${node.id}`, { headers: apiHeaders })
+      const json = await res.json()
+      if (json.code === 0) setNodeDetail(json.data)
+    }
   }, [apiHeaders])
 
   /* ── 提取所有标签 ── */
@@ -206,6 +242,20 @@ export default function TestCasePage() {
           {sidebarOpen ? '◀ 收起' : '▶ 展开'}
         </button>
         <span className="text-sm font-bold text-green-700">测例浏览</span>
+        <div className="flex items-center gap-0.5 ml-2">
+          <button
+            onClick={() => setViewMode('field')}
+            className={`text-xs px-2 py-1 rounded-l ${viewMode === 'field' ? 'bg-green-100 text-green-700 font-medium' : 'bg-gray-100 text-gray-500'}`}
+          >
+            字段级
+          </button>
+          <button
+            onClick={() => setViewMode('table')}
+            className={`text-xs px-2 py-1 rounded-r ${viewMode === 'table' ? 'bg-purple-100 text-purple-700 font-medium' : 'bg-gray-100 text-gray-500'}`}
+          >
+            表级
+          </button>
+        </div>
         <span className="text-xs text-gray-400">
           {selectedIds.size > 0
             ? `已选 ${selectedIds.size} / ${filtered.length} 项`
@@ -322,7 +372,10 @@ export default function TestCasePage() {
             >
               <Background />
               <Controls />
-              <MiniMap nodeColor={(n: any) => TYPE_COLORS[n.data?.field_type] || '#6b7280'} />
+              <MiniMap nodeColor={(n: any) => {
+                if (n.type === 'tableNode') return '#3b82f6'
+                return TYPE_COLORS[n.data?.field_type] || '#6b7280'
+              }} />
               <FitViewOnChange nodes={nodes} />
             </ReactFlow>
           </div>

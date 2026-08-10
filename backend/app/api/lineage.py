@@ -174,6 +174,289 @@ def graph(
     return {"code": 0, "data": {"nodes": nodes, "edges": edges}, "message": "ok"}
 
 
+@router.get("/overview")
+def overview(
+    query_ids: str | None = None,
+    user: dict = Depends(get_current_user),
+):
+    """返回纯表→表关系图谱（表级视图）。
+
+    从选中测例的 join ON 条件中提取列对，构建表间关联边：
+    - 节点：仅表节点（含列结构元数据供前端展示详情）
+    - 边：表↔表关联，标签为 ON 列对，如 [t1.col1]-[t2.col1]
+    - 相同表对 + 相同列对 → 合并为一条边
+    """
+    import json as _json
+
+    if not query_ids:
+        return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
+
+    ids = [int(x) for x in query_ids.split(",") if x.strip().isdigit()]
+    if not ids:
+        return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
+
+    with get_cursor() as cur:
+        # 1. 获取根子查询 hash
+        ph = ",".join(["%s"] * len(ids))
+        cur.execute(
+            f"SELECT subquery_hash FROM build_history WHERE id IN ({ph})", ids
+        )
+        sq_hashes = [r["subquery_hash"] for r in cur.fetchall()]
+        if not sq_hashes:
+            return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
+
+        # 2. BFS 收集所有子查询
+        all_sq: set[str] = set()
+        sq_queue = list(sq_hashes)
+        while sq_queue:
+            sq_h = sq_queue.pop(0)
+            if sq_h in all_sq:
+                continue
+            all_sq.add(sq_h)
+            cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_h,))
+            row = cur.fetchone()
+            if not row:
+                continue
+            struct = row["structure"]
+            for inner_h in struct.get("inner_subqueries", []):
+                if inner_h not in all_sq:
+                    sq_queue.append(inner_h)
+            for branch_h in struct.get("branches", []):
+                if branch_h not in all_sq:
+                    sq_queue.append(branch_h)
+
+        # 3. 每个子查询 BFS 字段 DAG，从 join 节点提取列对
+        raw_table_names: set[str] = set()
+        edge_candidates: list[tuple[str, str, frozenset]] = []
+
+        for sq_h in all_sq:
+            cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_h,))
+            row = cur.fetchone()
+            if not row:
+                continue
+            struct = row["structure"]
+            root_fields = struct.get("fields", [])
+
+            field_queue = list(root_fields)
+            visited_fields = set(field_queue)
+            local_exprs: dict[str, dict] = {}
+
+            while field_queue:
+                fh = field_queue.pop(0)
+                cur.execute("SELECT expression FROM fields WHERE hash = %s", (fh,))
+                frow = cur.fetchone()
+                if not frow:
+                    continue
+                expr = frow["expression"]
+                if isinstance(expr, str):
+                    expr = _json.loads(expr)
+                local_exprs[fh] = expr
+
+                if expr.get("op") == "column":
+                    table = expr.get("table", "")
+                    if table:
+                        raw_table_names.add(table)
+
+                cur.execute(
+                    "SELECT referenced_hash FROM field_references "
+                    "WHERE referrer_hash = %s",
+                    (fh,),
+                )
+                for ref_row in cur.fetchall():
+                    ref = ref_row["referenced_hash"]
+                    if ref not in visited_fields:
+                        visited_fields.add(ref)
+                        field_queue.append(ref)
+
+            # 从 join 节点提取列对
+            for fh, expr in local_exprs.items():
+                if expr.get("op") != "join":
+                    continue
+                on_hash = expr.get("on")
+                if not on_hash:
+                    continue
+                pairs = _extract_on_column_pairs(on_hash, local_exprs, cur)
+                if not pairs:
+                    continue
+
+                tables_in_on: set[str] = set()
+                for ca, cb in pairs:
+                    tables_in_on.add(ca[0])
+                    tables_in_on.add(cb[0])
+
+                if len(tables_in_on) >= 2:
+                    tl = sorted(tables_in_on)
+                    for i in range(len(tl)):
+                        for j in range(i + 1, len(tl)):
+                            edge_candidates.append(
+                                (tl[i], tl[j], frozenset(pairs))
+                            )
+
+        if not raw_table_names:
+            return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
+
+        # 4. 表名归一化 + 合并边
+        name_to_full: dict[str, str] = {}
+        tn_list = list(raw_table_names)
+        tn_ph = ",".join(["%s"] * len(tn_list))
+        cur.execute(
+            f"SELECT d.name AS db_name, t.table_name FROM tables t "
+            f"JOIN databases d ON d.id = t.database_id "
+            f"WHERE (d.name || '.' || t.table_name) IN ({tn_ph}) "
+            f"   OR t.table_name IN ({tn_ph})",
+            tn_list + tn_list,
+        )
+        for r in cur.fetchall():
+            db = r["db_name"]
+            tn = r["table_name"]
+            full = f"{db}.{tn}"
+            name_to_full[tn] = full
+            name_to_full[full] = full
+
+        def _resolve(tn: str) -> str:
+            return name_to_full.get(tn, tn)
+
+        normalized_edges: dict[tuple[str, str, frozenset], int] = {}
+        for ta, tb, pairs in edge_candidates:
+            ta_n = _resolve(ta)
+            tb_n = _resolve(tb)
+            if ta_n == tb_n:
+                continue
+            key = (min(ta_n, tb_n), max(ta_n, tb_n), pairs)
+            normalized_edges[key] = normalized_edges.get(key, 0) + 1
+
+        all_tables: set[str] = set()
+        for ta, tb, _ in normalized_edges:
+            all_tables.add(ta)
+            all_tables.add(tb)
+
+        # 5. 构建表节点（含列结构）
+        nodes = []
+        for tn in sorted(all_tables):
+            parts = tn.rsplit(".", 1)
+            db_name = parts[0] if len(parts) == 2 else ""
+            short_name = parts[-1]
+
+            columns = []
+            cur.execute(
+                "SELECT t.id FROM tables t JOIN databases d ON d.id = t.database_id "
+                "WHERE d.name = %s AND t.table_name = %s",
+                (db_name, short_name),
+            )
+            trow = cur.fetchone()
+            table_id = trow["id"] if trow else None
+
+            if table_id:
+                cur.execute(
+                    "SELECT column_name, column_type FROM table_columns "
+                    "WHERE table_id = %s ORDER BY ordinal_position",
+                    (table_id,),
+                )
+                columns = [
+                    {"name": r["column_name"], "type": r["column_type"]}
+                    for r in cur.fetchall()
+                ]
+
+            nodes.append({
+                "id": f"table:{tn}",
+                "type": "tableNode",
+                "data": {
+                    "db_name": db_name,
+                    "table_name": short_name,
+                    "full_name": tn,
+                    "table_id": table_id,
+                    "columns": columns,
+                },
+            })
+
+        # 6. 构建边：列对 → 标签 [col1]-[col2]
+        edges = []
+        for (ta, tb, pairs), _ in sorted(normalized_edges.items()):
+            pair_labels = []
+            for ca, cb in sorted(pairs):
+                pair_labels.append(f"[{ca[1]}]-[{cb[1]}]")
+            edges.append({
+                "id": f"{ta}=={tb}",
+                "source": f"table:{ta}",
+                "target": f"table:{tb}",
+                "label": "  ".join(pair_labels),
+            })
+
+    return {"code": 0, "data": {"nodes": nodes, "edges": edges}, "message": "ok"}
+
+
+def _extract_on_column_pairs(
+    on_hash: str,
+    exprs: dict[str, dict],
+    cur,
+) -> list[tuple[tuple[str, str], tuple[str, str]]]:
+    """从 ON 条件中提取列对 [(('t1','c1'), ('t2','c1')), ...]"""
+    import json as _j
+    pairs: list[tuple[tuple[str, str], tuple[str, str]]] = []
+
+    def _resolve_col(fh: str) -> tuple[str, str] | None:
+        seen: set[str] = set()
+        queue = [fh]
+        while queue:
+            h = queue.pop(0)
+            if h in seen:
+                continue
+            seen.add(h)
+            e = exprs.get(h)
+            if not e:
+                cur.execute(
+                    "SELECT expression FROM fields WHERE hash = %s", (h,)
+                )
+                erow = cur.fetchone()
+                if erow:
+                    e = erow["expression"]
+                    if isinstance(e, str):
+                        e = _j.loads(e)
+                    exprs[h] = e
+            if not e:
+                continue
+            if e.get("op") == "column":
+                return (e.get("table", ""), e.get("column", ""))
+            for arg in e.get("args", []):
+                child = arg.get("hash", "") if isinstance(arg, dict) else ""
+                if child:
+                    queue.append(child)
+        return None
+
+    seen: set[str] = set()
+    queue = [on_hash]
+    while queue:
+        h = queue.pop(0)
+        if h in seen:
+            continue
+        seen.add(h)
+        e = exprs.get(h)
+        if not e:
+            cur.execute("SELECT expression FROM fields WHERE hash = %s", (h,))
+            erow = cur.fetchone()
+            if erow:
+                e = erow["expression"]
+                if isinstance(e, str):
+                    e = _j.loads(e)
+                exprs[h] = e
+        if not e:
+            continue
+        op = e.get("op", "")
+        if op in ("eq", "neq", "gt", "lt", "gte", "lte"):
+            args = e.get("args", [])
+            if len(args) >= 2:
+                c1 = _resolve_col(args[0].get("hash", ""))
+                c2 = _resolve_col(args[1].get("hash", ""))
+                if c1 and c2 and c1[0] != c2[0]:
+                    pairs.append((c1, c2))
+        for arg in e.get("args", []):
+            child = arg.get("hash", "") if isinstance(arg, dict) else ""
+            if child and child not in seen:
+                queue.append(child)
+
+    return pairs
+
+
 @router.get("/node/{hash}")
 def node_detail(hash: str, user: dict = Depends(get_current_user)):
     """获取单个节点详情（含上下游）"""

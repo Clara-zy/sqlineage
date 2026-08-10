@@ -46,6 +46,15 @@ import-all: import-tests
 	@echo "Importing BIRD test cases on top..."
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/bird_import.py
 
+reset:
+	@echo "Clearing lineage data..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/clear_lineage.py
+	@echo "Re-importing test cases..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/import_tests.py
+	@echo "Importing BIRD test cases..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/bird_import.py
+	@echo "Reset complete."
+
 explore:
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/explore.py $(SQL)
 
