@@ -6,9 +6,14 @@
 
 ```
 ┌─ field_to_sql(hash)         穿透版递归（subquery_to_sql 积木块）
-├─ field_to_sql_full(hash,sq) 完整还原（前端人类可读）
-│   ├─ _SPEC  节点分类规约表（op → shape/param/prop）
-│   └─ 两个分发器：_f 读 shape，_compute_base 读 prop
+├─ field_to_sql_full(hash,sq) 完整还原（前端人类可读，薄封装）
+│   ├─ _SPEC          节点分类规约表（op → shape/param/prop）
+│   ├─ _render        渲染子片段（_f 与 _compute_base 共用，消费子 col）
+│   ├─ _compute_base  结构传播（读 prop，产出 col + exposed）
+│   ├─ _field_query   字段 → 完整查询（递归入口，投影可占位/枚举/实际）
+│   │    ├─ _condition_query  条件节点 → 完整查询（枚举中间态 __PROJ_ENUM__）
+│   │    └─ _where_query      where 组过滤 → 去糖成子查询 + WHERE
+│   └─ _assemble_select exposed → 最小 SELECT 行列表
 └─ subquery_to_sql(sq_hash)   编排层（内部调用 _f）
 ```
 
@@ -27,7 +32,7 @@
 | shape | 说明 | 成员 |
 |-------|------|------|
 | `atomic` | 无子节点，直接字符串 | column / literal / star / current_timestamp |
-| `penetrate` | 穿透 args[0] | alias / join / where / having / groupby / limt |
+| `penetrate` | 穿透 args[0] | alias / join / where / groupby / limt |
 | `cmp` | `a OP b`，字面量右移 | eq / neq / gt / lt / gte / lte / like / ilike / is / isdistinctfrom / similarto |
 | `arith` | `(a OP b)`，带括号 | div / mul / add / sub |
 | `keyword` | `a KW b KW c` | and / or / xor |
@@ -41,9 +46,9 @@
 |------|------|------|
 | `leaf` | 只贡献表（column/star 有表，其余无） | column / literal / star / current_timestamp |
 | `inherit` | 透明继承子节点 exposed（alias 的 AS 名由 field_to_sql_full 顶层体现） | alias |
-| `merge` | 合并所有子节点的结构上下文（tables/where/joins/having/groupby） | 所有条件/算术/标量/special |
+| `merge` | 合并所有子节点的结构上下文（tables/where/joins/groupby） | 所有条件/算术/标量/special |
 | `aggregate` | 继承子结构 + 包 `FUNC()` | count / sum / avg / min / max |
-| `structural` | 各自加结构键（走 `_STRUCTURAL`） | join / where / having / groupby / limt |
+| `structural` | 各自加结构键（走 `_STRUCTURAL`） | join / where / groupby / limt |
 
 **关键决策：prefix 兜底只面向「开集」标量函数**。标量函数的唯一变化量是函数名（即 op 本身），渲染统一为 `OP(args)`。因此 `_DEFAULT_SPEC = ("prefix", None, "merge")`，`date_format`、`abs`、`ceil`、`length` 等**未来任何新函数**都无需再写一行分支。而**运算符是「闭集」**（eq/neq/gt/like/is/and/or/xor/not/…），必须显式注册进 cmp/arith/keyword/unary，否则会错误落入 prefix 兜底渲染成 `LIKE(a,b)` 这种非法函数调用。
 
@@ -58,7 +63,6 @@ exposed = {
     joins:    [(table, on_sql), …], # JOIN 序列（有序，ON 与右表一一绑定）
     where:    {"cond"},             # WHERE 条件集合
     groupby:  {"col"},              # GROUP BY 键集合
-    having:   {"cond"},             # HAVING 条件集合
     orderby:  {"col ASC"},          # ORDER BY 集合
     limit:    10,                   # LIMIT 值
 }
@@ -111,7 +115,7 @@ _groupby_base(groupby, children=[count], group_keys=[dim_domin.region_nm])
 
 | 路径 | 来源 | 提供什么 |
 |------|------|---------|
-| `args[0]` | 被包裹的投影列 (count/sum 等) | col, tables, where, having |
+| `args[0]` | 被包裹的投影列 (count/sum 等) | col, tables, where |
 | `group_keys` | GROUP BY 键列 | 额外表、额外 JOIN ON 条件 |
 
 两条路径的 `tables`、`joins`、`where` 取并集（`_merge_joins` 去重保序），确保 SELECT 中同时包含聚合表达式和 GROUP BY 键。
@@ -127,12 +131,11 @@ FROM:   基表 = col 所属表，否则 tables − join 右表
 JOIN:   按 joins 列表顺序逐个 "join {右表} on {on_sql}"
 WHERE:  wheres 用 AND 连接
 GROUP BY: groupbys
-HAVING:  havings
 ORDER BY: orderbys
 LIMIT:   limit
 ```
 
-表达式节点走 `merge` prop：`_compute_base` 对 `_child_hashes`（args + casewhen 分支 + window partition/order + 函数命名参数）枚举的每个子节点递归，合并其 tables/where/joins/having/groupby；条件/纯表达式节点在组装层直接返回表达式片段，不包 SELECT。
+表达式节点走 `merge` prop：`_compute_base` 对 `_child_hashes`（args + casewhen 分支 + window partition/order + 函数命名参数）枚举的每个子节点递归，合并其 tables/where/joins/groupby。完整查询的递归组装见 §12（`_field_query`）。
 
 ## 7. 关键设计决策
 
@@ -146,6 +149,9 @@ LIMIT:   limit
 | groupby 双路径 | GROUP BY 涉及两类信息源，单路径递归信息不全 |
 | `joins` 有序 list | 保留 JOIN 顺序 + ON↔表绑定，避免多表 JOIN 张冠李戴 |
 | `field_type` 与 `_SPEC` 正交 | `field_type` 是持久化的语义分类（前端/升级引擎用），`_SPEC` 是运行时渲染分类（仅还原用），二者不融合 |
+| 去 having op | HAVING 是 WHERE 的语法糖（≡对聚合结果 WHERE，省一层子查询），血缘里不要糖；时机由 DAG 位置承载（where 包 column=行过滤，where 包 groupby/agg=组过滤） |
+| 组过滤去糖成子查询+WHERE | 输出无糖（B 方案）：聚合操作数展开成标准化子查询，不发 HAVING |
+| 条件节点枚举中间态 | `__PROJ_ENUM__[group_keys,聚合...]` 存「聚合子查询里可用的投影候选」，供下游选择 |
 
 ## 8. L2-04 还原实例
 
@@ -211,3 +217,48 @@ fields.expression (JSONB)
 ```
 
 `_SPEC` 的 shape/prop 完全由 `op` 决定，属于「读写时推断」，无需持久化；与持久化的语义分类 `field_type` 是正交的两个切面。
+
+## 12. 查询组装递归（字段 → 完整查询）
+
+`field_to_sql_full` 是薄封装，递归组装在 `_field_query(fh, exprs, cur, projection=None)`：条件/表达式节点走 `_condition_query`，where 包 group 过滤走 `_where_query`，其余走 `_assemble_select`。
+
+### 条件节点 → 完整查询
+
+条件 `gt(a, b)` 不再是平铺片段，而是「完整查询」：
+
+- 无 grouped 操作数：`select <非字面量操作数> from <操作数来源> where <条件>`。
+- 有 grouped 操作数：操作数展开成子查询，投影是**枚举中间态**：
+
+```sql
+select __PROJ_ENUM__[group_keys, 操作数聚合...]
+from (
+  select group_keys, 聚合 AS 别名...
+  from ...
+  where ...
+  group by group_keys
+) sub0
+where sub0.<聚合> <op> <值>
+```
+
+`__PROJ_ENUM__[...]` 存「这张聚合子查询里可用的投影候选」（group keys + 聚合），供下游（where/if）选择。
+
+### where 组过滤 → 去糖
+
+HAVING 已去 op，组过滤统一为 `where(groupby/agg, condition)`。`_where_query` 去糖成「子查询 + WHERE」：
+
+```sql
+select sub0.<包裹字段>
+from (聚合子查询) sub0
+where <条件引用 sub0 的输出列>
+```
+
+子查询 = 合并「投影聚合 + 条件引用的聚合」的聚合查询（`register_agg` 收集，alias 用别名、非 alias 用生成列名 `_aggN`）。
+
+### 三段式语义
+
+```
+gt 节点(条件)    → select __PROJ_ENUM__[候选...]  from (聚合子查询) where 条件
+where 节点(下游) → select 实际投影             from (聚合子查询) where 条件
+```
+
+原子条件准备枚举候选，下游节点填充实际投影。
