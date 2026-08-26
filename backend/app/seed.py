@@ -243,10 +243,6 @@ def _seed_bird():
                         (table_id, col_name, col_type, col_comment, i),
                     )
 
-        total_tables = sum(
-            len([c for c in db["column_names_original"] if c[0] != -1])
-            for db in db_list
-        )
         print(
             f"✓ BIRD 数据就绪 — {len(db_list)} 库 / "
             f"{sum(len(db['table_names_original']) for db in db_list)} 表"

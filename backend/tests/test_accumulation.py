@@ -43,11 +43,7 @@ class TestAccumulation:
 
     def test_same_expression_across_queries(self):
         """同一表达式 (nvl) 在不同查询中复用"""
-        r1 = build_lineage("SELECT nvl(mchnt_cd, 'UNKNOWN') AS safe_cd FROM trans_flow")
-
-        with get_cursor() as cur:
-            cur.execute("SELECT count(*) FROM fields")
-            total_before = cur.fetchone()["count"]
+        build_lineage("SELECT nvl(mchnt_cd, 'UNKNOWN') AS safe_cd FROM trans_flow")
 
         r2 = build_lineage(
             "SELECT nvl(mchnt_cd, 'UNKNOWN') AS safe_cd, trans_at FROM trans_flow"
@@ -66,7 +62,7 @@ class TestAccumulation:
             assert len(sq_hashes) >= 1
             inner_hash_1 = sq_hashes[0]  # 第一个子查询（内层）
 
-        r2 = build_lineage(f"SELECT a.total FROM ({inner}) a WHERE a.total > 100")
+        build_lineage(f"SELECT a.total FROM ({inner}) a WHERE a.total > 100")
 
         # 内层子查询应复用，hash 一致
         with get_cursor() as cur:

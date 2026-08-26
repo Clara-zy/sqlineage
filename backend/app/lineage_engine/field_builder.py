@@ -190,6 +190,8 @@ def _extract_args(node: exp.Expression, ctx: BuildContext) -> tuple[list[str], d
             continue
         if isinstance(val, exp.DataType):
             named[key] = val.sql()  # cast 的 to 类型名
+        elif isinstance(val, exp.Literal):
+            named[key] = val.sql()  # 常量字面量：存原始 SQL，不做内容寻址
         elif isinstance(val, exp.Expression):
             named[key] = build_field(val, ctx)
         elif isinstance(val, str) and val:
@@ -273,7 +275,8 @@ def _flatten_same_op(left_h: str, right_h: str, op: str, ctx: BuildContext) -> l
             return [hash_val]
         expr = row["expression"]
         if isinstance(expr, str):
-            import json; expr = json.loads(expr)
+            import json
+            expr = json.loads(expr)
         if expr.get("op") == op:
             return [a["hash"] for a in expr.get("args", [])]
         return [hash_val]
@@ -395,7 +398,6 @@ def build_alias_map(select_ast: exp.Select, ctx: BuildContext):
     for join in (select_ast.args.get("joins") or []):
         join_table = join.this
         join_kind = (join.args.get("kind") or "").upper()
-        join_side = (join.args.get("side") or "").upper()
 
         # 注册右表
         right_key = None

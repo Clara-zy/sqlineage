@@ -13,36 +13,96 @@ from app.database import get_cursor
 # 声明式节点规约
 # ════════════════════════════════════════
 
-# 每个节点类型：
-#   base(hash, exprs, cur) → (sql_fragment, exposed_params_dict)
-#   wrap(op_node, downstream_exposed, exprs, cur) → (wrapped_sql_fragment, new_exposed)
-# 叶子节点只有 base，结构节点只有 wrap
+# 每个 op → (shape, param, prop)：
+#   shape 渲染形状（_f 消费）  atomic / penetrate / cmp / arith / keyword / prefix / special
+#   param shape 参数：atomic/special 传函数，cmp/arith 传符号，keyword 传关键字，其余 None
+#   prop  结构传播（_compute_base 消费）  leaf / inherit / merge / aggregate / structural
 
-def _col_base(fh, e, exprs, cur):
+def _leaf_column(e, exprs, cur):
     t = e.get("table", "").split(".")[-1]
-    return f"{t}.{e.get('column', '')}", {"col": f"{t}.{e.get('column', '')}", "tables": {t}}
+    col = f"{t}.{e.get('column', '')}"
+    return col, {"col": col, "tables": {t}}
 
-def _literal_base(fh, e, exprs, cur):
+
+def _leaf_literal(e, exprs, cur):
     v = str(e.get("value", ""))
-    s = f"'{v}'" if e.get("type") == "string" else v
-    return s, {"col": s, "tables": set()}
+    col = f"'{v}'" if e.get("type") == "string" else v
+    return col, {"col": col, "tables": set()}
 
-def _star_base(fh, e, exprs, cur):
+
+def _leaf_star(e, exprs, cur):
     t = e.get("table", "").split(".")[-1] if e.get("table") else ""
-    s = f"{t}.*" if t else "*"
-    return s, {"col": s, "tables": {t} if t else set()}
+    col = f"{t}.*" if t else "*"
+    return col, {"col": col, "tables": {t} if t else set()}
 
-def _ts_base(fh, e, exprs, cur):
+
+def _leaf_ts(e, exprs, cur):
     return "CURRENT_TIMESTAMP", {"col": "CURRENT_TIMESTAMP", "tables": set()}
 
-def _cond_base(fh, e, exprs, cur):
-    """条件/表达式节点：递归子节点收集表信息"""
-    sql = _f(fh, exprs, cur)
-    tables = set()
-    for a in e.get("args", []):
-        h = a.get("hash", "") if isinstance(a, dict) else ""
-        if h: tables |= _leaf_tables(h, exprs, cur)
-    return sql, {"col": sql, "tables": tables}
+
+# ── 特殊渲染函数（返回 SQL 片段，_f 消费）──
+
+# ── 特殊渲染函数（返回 SQL 片段，消费 child_cols，不再递归）──
+
+def _r_in(e, child_cols, exprs, cur):
+    kw = "NOT IN" if e.get("op") == "notin" else "IN"
+    p = [child_cols.get(a["hash"], "?") for a in e.get("args", []) if isinstance(a, dict)]
+    return f"{p[0]} {kw} ({', '.join(p[1:])})"
+
+
+def _r_cast(e, child_cols, exprs, cur):
+    inner = ", ".join(child_cols.get(a["hash"], "?") for a in e.get("args", []) if isinstance(a, dict))
+    return f"CAST({inner} AS {e.get('params', {}).get('to', 'STRING')})"
+
+
+def _r_round(e, child_cols, exprs, cur):
+    inner = ", ".join(child_cols.get(a["hash"], "?") for a in e.get("args", []) if isinstance(a, dict))
+    return f"ROUND({inner}, {e.get('params', {}).get('decimals', '0')})"
+
+
+def _r_if(e, child_cols, exprs, cur):
+    a = [child_cols.get(x["hash"], "?") for x in e.get("args", []) if isinstance(x, dict)]
+    p = e.get("params", {})
+    true_sql = child_cols.get(p.get("true", ""), p.get("true", ""))
+    false_sql = child_cols.get(p.get("false", ""), p.get("false", ""))
+    return f"IF({a[0] if a else ''}, {true_sql}, {false_sql})"
+
+
+def _r_case(e, child_cols, exprs, cur):
+    parts = []
+    for c in e.get("args", []):
+        if c.get("condition"):
+            parts.append(f"WHEN {child_cols.get(c['condition'], '?')} THEN {child_cols.get(c['value'], '?')}")
+        else:
+            parts.append(f"ELSE {child_cols.get(c['value'], '?')}")
+    return f"CASE {' '.join(parts)} END"
+
+
+def _r_window(e, child_cols, exprs, cur):
+    inner = child_cols.get(e["args"][0]["hash"], "?") if e.get("args") else ""
+    parts = [inner, "OVER ("]
+    pb = e.get("partition_by", [])
+    ob = e.get("order_by", [])
+    frame = e.get("frame", "")
+    if pb:
+        parts.append("PARTITION BY " + ", ".join(child_cols.get(p["hash"], "?") for p in pb if isinstance(p, dict)))
+    if ob:
+        parts.append((" " if pb else "") + "ORDER BY " + ", ".join(child_cols.get(o["hash"], "?") for o in ob if isinstance(o, dict)))
+    if frame:
+        parts.append((" " if (pb or ob) else "") + frame)
+    parts.append(")")
+    return " ".join(parts)
+
+
+def _r_ordr(e, child_cols, exprs, cur):
+    inner = child_cols.get(e["args"][0]["hash"], "?")
+    return f"{inner} DESC" if e.get("desc") else inner
+
+
+def _r_paren(e, child_cols, exprs, cur):
+    inner = child_cols.get(e["args"][0]["hash"], "?") if e.get("args") else ""
+    return f"({inner})"
+
 
 # 结构包裹节点
 
@@ -50,240 +110,270 @@ def _join_base(fh, e, exprs, cur):
     """join 节点：递归 args[0] → 列 + on → 条件，合并两条路径"""
     args = e.get("args", [])
     if not args:
-        return "?", {"col": "?", "tables": set()}
+        return "?", {"col": "?", "tables": set(), "joins": []}
     child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
+    joins = list(child_exp.get("joins", []))
     on_h = e.get("on", "")
     if on_h:
         on_sql, on_exp = _compute_base(on_h, exprs, cur)
-        on_exp["on"] = {on_sql} | on_exp.get("on", set())
+        # 本层 JOIN 引入的右表 = ON 条件涉及的表 − 子节点已累积的表
+        new_tables = on_exp.get("tables", set()) - child_exp.get("tables", set())
+        right_table = sorted(new_tables)[0] if new_tables else "?"
+        joins.append((right_table, on_sql))
+        on_tables = on_exp.get("tables", set())
     else:
-        on_sql, on_exp = "?", {"col": "?", "tables": set(), "on": set()}
+        on_tables = set()
     return child_sql, {
         "col": child_sql,
-        "tables": child_exp.get("tables", set()) | on_exp.get("tables", set()),
-        "on": child_exp.get("on", set()) | on_exp.get("on", set()),
+        "tables": child_exp.get("tables", set()) | on_tables,
+        "joins": joins,
     }
 
 def _where_base(fh, e, exprs, cur):
     args = e.get("args", [])
-    if not args: return "?", {"col": "?", "tables": set()}
+    if not args:
+        return "?", {"col": "?", "tables": set()}
     child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
     cond_h = e.get("condition", "")
-    cond_sql = _f(cond_h, exprs, cur) if cond_h else "?"
-    return child_sql, {
-        **child_exp,
-        "where": {cond_sql} | child_exp.get("where", set()),
-    }
+    if not cond_h:
+        return child_sql, child_exp
+    cond_sql, cond_exp = _compute_base(cond_h, exprs, cur)
+    result = _merge_exposed(child_exp, cond_exp)
+    result["where"] = {cond_sql} | result.get("where", set())
+    return child_sql, result
 
 def _groupby_base(fh, e, exprs, cur):
     args = e.get("args", [])
-    if not args: return "?", {"col": "?", "tables": set()}
+    if not args:
+        return "?", {"col": "?", "tables": set()}
     child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
 
     # group_keys 是另一条路径，需要递归获取其中的表/join 信息
     key_sqls = set()
     key_tables = set()
-    key_on = set()
+    key_joins = []
     key_where = set()
     for k in e.get("group_keys", []):
         h = k.get("hash", "") if isinstance(k, dict) else k
-        if not h: continue
+        if not h:
+            continue
         key_sqls.add(_f(h, exprs, cur))
         # 递归 group key 的 base 获取其包含的表/join/where 信息
         _, key_exp = _compute_base(h, exprs, cur)
         key_tables |= key_exp.get("tables", set())
-        key_on |= key_exp.get("on", set())
+        key_joins.extend(key_exp.get("joins", []))
         key_where |= key_exp.get("where", set())
 
     return child_sql, {
         "col": child_sql,
         "tables": child_exp.get("tables", set()) | key_tables,
-        "on": child_exp.get("on", set()) | key_on,
+        "joins": _merge_joins(child_exp.get("joins", []), key_joins),
         "where": child_exp.get("where", set()) | key_where,
         "groupby": key_sqls | child_exp.get("groupby", set()),
     }
 
 def _having_base(fh, e, exprs, cur):
     args = e.get("args", [])
-    if not args: return "?", {"col": "?", "tables": set()}
+    if not args:
+        return "?", {"col": "?", "tables": set()}
     child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
     cond_h = e.get("condition", "")
-    cond_sql = _f(cond_h, exprs, cur) if cond_h else "?"
-    return child_sql, {
-        **child_exp,
-        "having": {cond_sql} | child_exp.get("having", set()),
-    }
+    if not cond_h:
+        return child_sql, child_exp
+    cond_sql, cond_exp = _compute_base(cond_h, exprs, cur)
+    result = _merge_exposed(child_exp, cond_exp)
+    result["having"] = {cond_sql} | result.get("having", set())
+    return child_sql, result
 
 def _limt_base(fh, e, exprs, cur):
     args = e.get("args", [])
-    if not args: return "?", {"col": "?", "tables": set()}
+    if not args:
+        return "?", {"col": "?", "tables": set()}
     child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
     result = {**child_exp, "limit": e.get("limit")}
     orders = set()
     for od in e.get("order_by", []):
-        if isinstance(od, str): orders.add(_f(od, exprs, cur))
+        if isinstance(od, str):
+            orders.add(_f(od, exprs, cur))
     if orders:
         result["orderby"] = orders | child_exp.get("orderby", set())
     return child_sql, result
 
-# 叶子节点：base
-_LEAF_SPEC = {
-    "column": _col_base,
-    "literal": _literal_base,
-    "star": _star_base,
-    "current_timestamp": _ts_base,
+# ── 规约表：op → (shape, param, prop) ──
+
+_SPEC = {
+    # 叶子
+    "column": ("atomic", _leaf_column, "leaf"),
+    "literal": ("atomic", _leaf_literal, "leaf"),
+    "star": ("atomic", _leaf_star, "leaf"),
+    "current_timestamp": ("atomic", _leaf_ts, "leaf"),
+    # 穿透（alias 在 _compute_base 透明，AS 名由 field_to_sql_full 顶层体现）
+    "alias": ("penetrate", None, "inherit"),
+    "ordr": ("special", _r_ordr, "merge"),
+    "paren": ("special", _r_paren, "merge"),
+    # 比较（cmp：无括号 + 字面量右移）
+    "eq": ("cmp", "=", "merge"),
+    "neq": ("cmp", "!=", "merge"),
+    "gt": ("cmp", ">", "merge"),
+    "lt": ("cmp", "<", "merge"),
+    "gte": ("cmp", ">=", "merge"),
+    "lte": ("cmp", "<=", "merge"),
+    "like": ("cmp", "LIKE", "merge"),
+    "ilike": ("cmp", "ILIKE", "merge"),
+    "is": ("cmp", "IS", "merge"),
+    "isdistinctfrom": ("cmp", "IS DISTINCT FROM", "merge"),
+    "similarto": ("cmp", "SIMILAR TO", "merge"),
+    # 算术（arith：带括号）
+    "div": ("arith", "/", "merge"),
+    "mul": ("arith", "*", "merge"),
+    "add": ("arith", "+", "merge"),
+    "sub": ("arith", "-", "merge"),
+    # 逻辑
+    "and": ("keyword", "AND", "merge"),
+    "or": ("keyword", "OR", "merge"),
+    "xor": ("keyword", "XOR", "merge"),
+    "not": ("unary", "NOT", "merge"),
+    # 列表
+    "in": ("special", _r_in, "merge"),
+    "notin": ("special", _r_in, "merge"),
+    # 聚合
+    "count": ("prefix", None, "aggregate"),
+    "sum": ("prefix", None, "aggregate"),
+    "avg": ("prefix", None, "aggregate"),
+    "min": ("prefix", None, "aggregate"),
+    "max": ("prefix", None, "aggregate"),
+    # 特殊
+    "cast": ("special", _r_cast, "merge"),
+    "round": ("special", _r_round, "merge"),
+    "if": ("special", _r_if, "merge"),
+    "casewhen": ("special", _r_case, "merge"),
+    "window": ("special", _r_window, "merge"),
+    "row_number": ("prefix", None, "merge"),
+    # 结构（_f 穿透 args[0]，_compute_base 走 _STRUCTURAL）
+    "join": ("penetrate", None, "structural"),
+    "where": ("penetrate", None, "structural"),
+    "having": ("penetrate", None, "structural"),
+    "groupby": ("penetrate", None, "structural"),
+    "limt": ("penetrate", None, "structural"),
 }
 
-# 条件节点也当叶子处理（它们在 ON/WHERE 中被 _f 递归）
-for _op in ("eq", "neq", "gt", "lt", "gte", "lte", "in", "notin",
-            "and", "or", "div", "mul", "add", "sub"):
-    _LEAF_SPEC[_op] = _cond_base
+# 未知 op → 一律按标量函数（prefix：OP(args)），彻底消灭标量函数穷举
+_DEFAULT_SPEC = ("prefix", None, "merge")
 
-# 聚合函数 base：递归子节点保留完整上下文
-def _agg_base(fh, e, exprs, cur):
-    """聚合函数：穿透 args[0]，继承所有下层信息，再包裹 COUNT(...)"""
-    args = e.get("args", [])
-    if not args:
-        sql = _f(fh, exprs, cur)
-        return sql, {"col": sql, "tables": set()}
-    child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
-    op = e.get("op", "count").upper()
-    formatted = f"{op}({child_sql})"
-    return formatted, {**child_exp, "col": formatted}
+_STRUCTURAL = {
+    "join": _join_base,
+    "where": _where_base,
+    "having": _having_base,
+    "groupby": _groupby_base,
+    "limt": _limt_base,
+}
 
-for _op in ("count", "sum", "avg", "min", "max"):
-    _LEAF_SPEC[_op] = _agg_base
 
-# 结构节点自身可做 base
-_LEAF_SPEC["join"] = _join_base
-_LEAF_SPEC["where"] = _where_base
-_LEAF_SPEC["groupby"] = _groupby_base
-_LEAF_SPEC["having"] = _having_base
-_LEAF_SPEC["limt"] = _limt_base
+def _spec(op):
+    return _SPEC.get(op, _DEFAULT_SPEC)
 
 # 结构包裹节点：wrap
-def _leaf_tables(fh, exprs, cur) -> set[str]:
-    """获取节点涉及的所有表名（递归叶子）"""
-    e = _load(fh, exprs, cur)
-    if not e:
-        return set()
-    op = e.get("op", "")
-    if op in ("column", "star"):
-        t = e.get("table", "").split(".")[-1] if e.get("table") else ""
-        return {t} if t else set()
-    if op in _LEAF_SPEC:
-        tables = set()
-        for a in e.get("args", []):
-            h = a.get("hash", "") if isinstance(a, dict) else ""
-            if h:
-                tables |= _leaf_tables(h, exprs, cur)
-        return tables
-    return set()
+def _child_hashes(e) -> list[str]:
+    """提取节点表达式中所有子节点 hash（args + casewhen 分支 + window partition/order + 函数命名参数）"""
+    out = []
+    for a in e.get("args", []):
+        if isinstance(a, dict):
+            if a.get("hash"):
+                out.append(a["hash"])
+            # casewhen 分支：{condition, value}
+            if a.get("condition"):
+                out.append(a["condition"])
+            if a.get("value"):
+                out.append(a["value"])
+    for pb in e.get("partition_by", []):
+        if isinstance(pb, dict) and pb.get("hash"):
+            out.append(pb["hash"])
+    for ob in e.get("order_by", []):
+        if isinstance(ob, dict) and ob.get("hash"):
+            out.append(ob["hash"])
+    # 函数命名参数中的 hash 引用（如 if 的 true/false）
+    for v in (e.get("params") or {}).values():
+        if isinstance(v, str) and len(v) == 16:
+            out.append(v)
+    return out
+
+
+def _merge_joins(*join_lists):
+    """按序合并 join 序列，去重 (table, on_sql) 对"""
+    seen, out = set(), []
+    for lst in join_lists:
+        for pair in lst:
+            if pair not in seen:
+                seen.add(pair)
+                out.append(pair)
+    return out
+
+
+def _merge_exposed(base, extra):
+    """合并两个 exposed dict：tables/where/having/groupby 取并集，joins 去重保序"""
+    result = dict(base)
+    result["tables"] = base.get("tables", set()) | extra.get("tables", set())
+    result["where"] = base.get("where", set()) | extra.get("where", set())
+    result["having"] = base.get("having", set()) | extra.get("having", set())
+    result["groupby"] = base.get("groupby", set()) | extra.get("groupby", set())
+    result["joins"] = _merge_joins(base.get("joins", []), extra.get("joins", []))
+    return result
 
 
 # ════════════════════════════════════════
 # 穿透版 _f（subquery_to_sql 用，不变）
 # ════════════════════════════════════════
 
-_COMPARE = {"eq": "=", "neq": "!=", "gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
-_ARITH = {"div": "/", "mul": "*", "add": "+", "sub": "-"}
-_PENETRATE = {"join", "where", "having", "groupby", "limt"}
-
-
 def field_to_sql(fh: str) -> str:
     with get_cursor() as cur:
         return _f(fh, {}, cur)
 
 
+def _render(e, child_cols, exprs, cur):
+    """用子节点已算好的 col 组装本节点 SQL 片段（不递归，消费 child_cols）。_f 与 _compute_base 共用。"""
+    op = e.get("op", "?")
+    shape, param, _prop = _spec(op)
+    args = e.get("args", [])
+
+    def C(h):
+        return child_cols.get(h, "?")
+
+    if shape == "atomic":
+        return param(e, exprs, cur)[0]
+    if shape == "special":
+        return param(e, child_cols, exprs, cur)
+    if shape == "penetrate":
+        return C(args[0]["hash"]) if args else "?"
+    if shape == "cmp":
+        if len(args) >= 2:
+            left = C(args[0]["hash"])
+            right = C(args[1]["hash"])
+            if exprs.get(args[0]["hash"], {}).get("op") == "literal":
+                left, right = right, left
+            return f"{left} {param} {right}"
+        return ", ".join(C(a["hash"]) for a in args if isinstance(a, dict))
+    if shape == "arith":
+        if len(args) >= 2:
+            return f"({C(args[0]['hash'])} {param} {C(args[1]['hash'])})"
+        return ", ".join(C(a["hash"]) for a in args if isinstance(a, dict))
+    if shape == "keyword":
+        return f" {param} ".join(C(a["hash"]) for a in args if isinstance(a, dict))
+    if shape == "unary":
+        return f"{param} {C(args[0]['hash'])}" if args else param
+    if shape == "prefix":
+        return f"{op.upper()}({', '.join(C(a['hash']) for a in args if isinstance(a, dict))})"
+    return f"<{op}>"
+
+
 def _f(fh, exprs, cur, aliases=None):
+    """穿透版渲染：先递归算子节点 col，再用 _render 组装"""
     if aliases and fh in aliases:
         return aliases[fh]
     e = _load(fh, exprs, cur)
     if not e:
         return "?"
-    op = e.get("op", "?")
-    a2 = aliases
-
-    if op == "column":
-        t = e.get("table", "").split(".")[-1]
-        return f"{t}.{e.get('column', '')}"
-    if op == "literal":
-        v = str(e.get("value", ""))
-        return f"'{v}'" if e.get("type") == "string" else v
-    if op == "star":
-        t = e.get("table", "").split(".")[-1] if e.get("table") else ""
-        return f"{t}.*" if t else "*"
-    if op == "current_timestamp":
-        return "CURRENT_TIMESTAMP"
-    if op in _PENETRATE:
-        a = e.get("args", [])
-        return _f(a[0]["hash"], exprs, cur, a2) if a else "?"
-    if op == "alias":
-        return _f(e["args"][0]["hash"], exprs, cur, a2)
-    if op == "ordr":
-        inner = _f(e["args"][0]["hash"], exprs, cur, a2)
-        return f"{inner} DESC" if e.get("desc") else inner
-    if op in ("count", "sum", "avg", "min", "max"):
-        return f"{op.upper()}({_child_sql(e, exprs, cur, a2)})"
-    if op in _COMPARE:
-        a = e.get("args", [])
-        if len(a) >= 2:
-            left, right = _f(a[0]["hash"], exprs, cur, a2), _f(a[1]["hash"], exprs, cur, a2)
-            if exprs.get(a[0]["hash"], {}).get("op") in ("literal",):
-                left, right = right, left
-            return f"{left} {_COMPARE[op]} {right}"
-        return _child_sql(e, exprs, cur, a2)
-    if op in ("and", "or"):
-        parts = [_f(a["hash"], exprs, cur, a2) for a in e.get("args", []) if isinstance(a, dict)]
-        return f" {op.upper()} ".join(parts)
-    if op in _ARITH:
-        a = e.get("args", [])
-        if len(a) >= 2:
-            return f"({_f(a[0]['hash'], exprs, cur, a2)} {_ARITH[op]} {_f(a[1]['hash'], exprs, cur, a2)})"
-        return _child_sql(e, exprs, cur, a2)
-    if op == "in":
-        p = [_f(a["hash"], exprs, cur, a2) for a in e.get("args", []) if isinstance(a, dict)]
-        return f"{p[0]} IN ({', '.join(p[1:])})"
-    if op == "notin":
-        p = [_f(a["hash"], exprs, cur, a2) for a in e.get("args", []) if isinstance(a, dict)]
-        return f"{p[0]} NOT IN ({', '.join(p[1:])})"
-    if op == "round":
-        return f"ROUND({_child_sql(e, exprs, cur, a2)}, {e.get('params',{}).get('decimals','0')})"
-    if op == "cast":
-        return f"CAST({_child_sql(e, exprs, cur, a2)} AS {e.get('params',{}).get('to','STRING')})"
-    if op == "nvl":
-        return f"NVL({_child_sql(e, exprs, cur, a2)})"
-    if op == "if":
-        a = [_f(a["hash"], exprs, cur, a2) for a in e.get("args", []) if isinstance(a, dict)]
-        p = e.get("params", {})
-        return f"IF({a[0] if a else ''}, {p.get('true','')}, {p.get('false','')})"
-    if op == "concat":
-        return f"CONCAT({_child_sql(e, exprs, cur, a2)})"
-    if op == "substring":
-        return f"SUBSTRING({_child_sql(e, exprs, cur, a2)})"
-    if op == "casewhen":
-        parts = []
-        for c in e.get("args", []):
-            if c.get("condition"):
-                parts.append(f"WHEN {_f(c['condition'], exprs, cur, a2)} THEN {_f(c['value'], exprs, cur, a2)}")
-            else:
-                parts.append(f"ELSE {_f(c['value'], exprs, cur, a2)}")
-        return f"CASE {' '.join(parts)} END"
-    if op == "row_number":
-        parts = ["ROW_NUMBER() OVER ("]
-        pb = e.get("partition_by", [])
-        ob = e.get("order_by", [])
-        if pb:
-            parts.append("PARTITION BY " + ", ".join(_f(p["hash"], exprs, cur, a2) for p in pb if isinstance(p, dict)))
-        if ob:
-            parts.append((" " if pb else "") + "ORDER BY " + ", ".join(_f(o["hash"], exprs, cur, a2) for o in ob if isinstance(o, dict)))
-        parts.append(")")
-        return " ".join(parts)
-    return f"<{op}>"
-
-
-def _child_sql(e, exprs, cur, aliases=None):
-    return ", ".join(_f(a["hash"], exprs, cur, aliases) for a in e.get("args", []) if isinstance(a, dict))
+    child_cols = {h: _f(h, exprs, cur, aliases) for h in _child_hashes(e)}
+    return _render(e, child_cols, exprs, cur)
 
 
 # ════════════════════════════════════════
@@ -297,14 +387,12 @@ def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
     """
     with get_cursor() as cur:
         exprs: dict[str, dict] = {}
-        sq_fields: set[str] = set()
 
         if sq_hash:
             cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_hash,))
             row = cur.fetchone()
             if row:
                 _bfs(row["structure"].get("fields", []), exprs, cur)
-                sq_fields = set(exprs.keys())
 
         _bfs([fh], exprs, cur)
         # 额外引用
@@ -329,32 +417,38 @@ def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
         if base_e and base_e.get("op") in _COND_OPS:
             return exposed["col"]
 
+        # 顶层 alias：在 SELECT 层体现 AS 别名（_compute_base 对 alias 透明，避免嵌套污染比较）
+        if base_e and base_e.get("op") == "alias" and base_e.get("alias_name"):
+            exposed["col"] = f"{exposed['col']} AS {base_e['alias_name']}"
+
         tables = sorted(exposed.get("tables", set()))
-        ons = list(exposed.get("on", set()))
+        joins = list(exposed.get("joins", []))
+        join_tables = {jt for jt, _ in joins}
         wheres = list(exposed.get("where", set()))
         havings = list(exposed.get("having", set()))
         groupbys = list(exposed.get("groupby", set()))
         orderbys = list(exposed.get("orderby", set()))
         limit = exposed.get("limit")
 
-        # FROM 表优先取列所属表
+        # FROM 基表：优先取列所属表，否则取未被 JOIN 覆盖的表
         base_e = _load(fh, exprs, cur)
         col_table = ""
         if base_e and base_e.get("op") == "column":
             col_table = base_e.get("table", "").split(".")[-1]
         if col_table and col_table in tables:
-            tables.remove(col_table)
-            tables = [col_table] + sorted(tables)
+            base_table = col_table
+        else:
+            leftover = sorted(set(tables) - join_tables)
+            base_table = leftover[0] if leftover else (tables[0] if tables else "?")
 
         # SELECT: groupby keys 在前，col 在后（去重）
         select_cols = sorted(exposed.get("groupby", set()))
         if exposed["col"] not in select_cols:
             select_cols.append(exposed["col"])
         lines = [f"select {', '.join(select_cols)}"]
-        lines.append(f"from {tables[0]}" if tables else "from ?")
-        for i, t in enumerate(tables[1:]):
-            on = ons[i] if i < len(ons) else "?"
-            lines.append(f"  join {t} on {on}")
+        lines.append(f"from {base_table}" if tables else "from ?")
+        for right_table, on_sql in joins:
+            lines.append(f"  join {right_table} on {on_sql}")
 
         if wheres:
             lines.append(f"where {' AND '.join(wheres)}")
@@ -371,24 +465,51 @@ def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
 
 
 def _compute_base(fh, exprs, cur):
-    """递归计算叶子节点的 base 和 exposed"""
+    """递归计算字段的 base（SQL 片段 + exposed）。读 _SPEC 的 prop 决定结构传播。"""
     e = _load(fh, exprs, cur)
     if not e:
         return "?", {"col": "?", "tables": set()}
     op = e.get("op", "")
+    _shape, param, prop = _spec(op)
 
-    fn = _LEAF_SPEC.get(op)
-    if fn:
-        return fn(fh, e, exprs, cur)
-
-    # 穿透到 args[0]：alias 等非结构节点
-    if op == "alias":
+    if prop == "leaf":
+        return param(e, exprs, cur)
+    if prop == "inherit":
         return _compute_base(e["args"][0]["hash"], exprs, cur)
-
-    # 其他：alias → 穿透
-    if op == "alias":
-        return _compute_base(e["args"][0]["hash"], exprs, cur)
-
+    if prop == "merge":
+        child_cols = {}
+        tables = set()
+        wheres = set()
+        joins = []
+        havings = set()
+        groupbys = set()
+        for h in _child_hashes(e):
+            child_col, child_exp = _compute_base(h, exprs, cur)
+            child_cols[h] = child_col
+            tables |= child_exp.get("tables", set())
+            wheres |= child_exp.get("where", set())
+            joins = _merge_joins(joins, child_exp.get("joins", []))
+            havings |= child_exp.get("having", set())
+            groupbys |= child_exp.get("groupby", set())
+        col = _render(e, child_cols, exprs, cur)
+        return col, {
+            "col": col,
+            "tables": tables,
+            "where": wheres,
+            "joins": joins,
+            "having": havings,
+            "groupby": groupbys,
+        }
+    if prop == "aggregate":
+        args = e.get("args", [])
+        if not args:
+            col = _render(e, {}, exprs, cur)
+            return col, {"col": col, "tables": set()}
+        child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
+        formatted = f"{op.upper()}({child_sql})"
+        return formatted, {**child_exp, "col": formatted}
+    if prop == "structural":
+        return _STRUCTURAL[op](fh, e, exprs, cur)
     return f"<{op}>", {"col": f"<{op}>", "tables": set()}
 
 
@@ -440,7 +561,7 @@ def _select_sql(sq_hash, struct, cur):
     tables = sorted(_collect_tables(exprs))
     if subq_alias and inner_sqs:
         inner_sql = subquery_to_sql(inner_sqs[0])
-        indented = "\n".join("  " + l for l in inner_sql.split("\n"))
+        indented = "\n".join("  " + line for line in inner_sql.split("\n"))
         from_clause = f"(\n{indented}\n) AS {subq_alias}"
         join_clauses = []
     elif tables:
@@ -457,14 +578,19 @@ def _select_sql(sq_hash, struct, cur):
     order_exprs = _collect_orders(roots, exprs, cur)
     limit_val = _collect_limit(roots, exprs)
 
-    lines = [f"SELECT\n  " + ",\n  ".join(select_parts),
+    lines = ["SELECT\n  " + ",\n  ".join(select_parts),
              f"FROM {from_clause}"]
     lines.extend(join_clauses)
-    if where_cond: lines.append(f"WHERE {where_cond}")
-    if group_keys: lines.append(f"GROUP BY {', '.join(group_keys)}")
-    if having_cond: lines.append(f"HAVING {having_cond}")
-    if order_exprs: lines.append(f"ORDER BY " + ", ".join(order_exprs))
-    if limit_val is not None: lines.append(f"LIMIT {limit_val}")
+    if where_cond:
+        lines.append(f"WHERE {where_cond}")
+    if group_keys:
+        lines.append(f"GROUP BY {', '.join(group_keys)}")
+    if having_cond:
+        lines.append(f"HAVING {having_cond}")
+    if order_exprs:
+        lines.append("ORDER BY " + ", ".join(order_exprs))
+    if limit_val is not None:
+        lines.append(f"LIMIT {limit_val}")
     return "\n".join(lines)
 
 
@@ -502,14 +628,17 @@ def _bfs(roots, exprs, cur):
         for key in ("condition", "on"):
             h = e.get(key)
             if h and h not in visited:
-                visited.add(h); extra.append(h)
+                visited.add(h)
+                extra.append(h)
         for gk in e.get("group_keys", []):
             h = gk.get("hash", "") if isinstance(gk, dict) else gk
             if h and h not in visited:
-                visited.add(h); extra.append(h)
+                visited.add(h)
+                extra.append(h)
         for od in e.get("order_by", []):
             if isinstance(od, str) and od not in visited:
-                visited.add(od); extra.append(od)
+                visited.add(od)
+                extra.append(od)
     while extra:
         fh = extra.pop(0)
         _load(fh, exprs, cur)
@@ -526,17 +655,23 @@ def _collect_tables(exprs):
 
 def _collect_ons(roots, exprs, cur):
     ons, seen = [], set()
+
     def w(fh):
         e = exprs.get(fh)
-        if not e: return
+        if not e:
+            return
         if e.get("op") == "join":
             on = e.get("on")
             if on and on not in seen:
-                seen.add(on); ons.append(_f(on, exprs, cur))
+                seen.add(on)
+                ons.append(_f(on, exprs, cur))
         for a in e.get("args", []):
-            c = a.get("hash","") if isinstance(a, dict) else ""
-            if c: w(c)
-    for r in roots: w(r)
+            c = a.get("hash", "") if isinstance(a, dict) else ""
+            if c:
+                w(c)
+
+    for r in roots:
+        w(r)
     return ons
 
 
@@ -545,7 +680,8 @@ def _first_where(roots, exprs, cur):
         e = exprs.get(r, {})
         if e.get("op") == "where":
             cond = e.get("condition", "")
-            if cond: return _f(cond, exprs, cur)
+            if cond:
+                return _f(cond, exprs, cur)
     return None
 
 
@@ -554,40 +690,53 @@ def _first_having(roots, exprs, cur):
         e = exprs.get(r, {})
         if e.get("op") == "having":
             cond = e.get("condition", "")
-            if cond: return _f(cond, exprs, cur)
+            if cond:
+                return _f(cond, exprs, cur)
     return None
 
 
 def _collect_keys(roots, exprs, cur):
     keys, seen = [], set()
+
     def w(fh):
         e = exprs.get(fh)
-        if not e: return
+        if not e:
+            return
         if e.get("op") == "groupby":
             for gk in e.get("group_keys", []):
-                h = gk.get("hash","") if isinstance(gk, dict) else gk
+                h = gk.get("hash", "") if isinstance(gk, dict) else gk
                 if h and h not in seen:
-                    seen.add(h); keys.append(_f(h, exprs, cur))
+                    seen.add(h)
+                    keys.append(_f(h, exprs, cur))
         for a in e.get("args", []):
-            c = a.get("hash","") if isinstance(a, dict) else ""
-            if c: w(c)
-    for r in roots: w(r)
+            c = a.get("hash", "") if isinstance(a, dict) else ""
+            if c:
+                w(c)
+
+    for r in roots:
+        w(r)
     return keys
 
 
 def _collect_orders(roots, exprs, cur):
     orders, seen = [], set()
+
     def w(fh):
         e = exprs.get(fh)
-        if not e: return
+        if not e:
+            return
         if e.get("op") == "limt":
             for od in e.get("order_by", []):
                 if isinstance(od, str) and od not in seen:
-                    seen.add(od); orders.append(_f(od, exprs, cur))
+                    seen.add(od)
+                    orders.append(_f(od, exprs, cur))
         for a in e.get("args", []):
-            c = a.get("hash","") if isinstance(a, dict) else ""
-            if c: w(c)
-    for r in roots: w(r)
+            c = a.get("hash", "") if isinstance(a, dict) else ""
+            if c:
+                w(c)
+
+    for r in roots:
+        w(r)
     return orders
 
 

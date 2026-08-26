@@ -133,12 +133,9 @@ def create_table(
             )
 
         # root 表自动构建 atomic 字段
-        from app.lineage_engine.engine import build_lineage
         from app.lineage_engine.context import BuildContext
-        from app.lineage_engine.field_builder import build_column, _maybe_parse_enum
+        from app.lineage_engine.field_builder import _maybe_parse_enum
         from app.lineage_engine.context import compute_hash
-        import sqlglot.expressions as exp
-        import json
 
         if req.source == "root":
             ctx = BuildContext()

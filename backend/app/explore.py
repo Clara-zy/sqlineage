@@ -81,7 +81,7 @@ def main():
         print(f"\n❌ 构建失败: {e}")
         sys.exit(1)
 
-    print(f"\n📊 结果:")
+    print("\n📊 结果:")
     print(f"   新建字段: {result['new_fields']}")
     print(f"   新建子查询: {result['new_subqueries']}")
     print(f"   复用节点: {result['reused_nodes']}")
@@ -94,7 +94,7 @@ def main():
         )
         rows = cur.fetchall()
         if rows:
-            print(f"\n📋 所有字段 (最近创建在前):")
+            print("\n📋 所有字段 (最近创建在前):")
             print(f"   {'hash':<18} {'type':<20} {'summary'}")
             print(f"   {'-'*18} {'-'*20} {'-'*30}")
             for r in rows[:20]:
@@ -120,11 +120,11 @@ def main():
         )
         sq_rows = cur.fetchall()
         if sq_rows:
-            print(f"\n📦 子查询:")
+            print("\n📦 子查询:")
             for r in sq_rows[:5]:
                 print(f"   {r['hash']:<18} {r['subquery_type']:<8} {r['field_count']} 个投影字段")
 
-    print(f"\n✅ 数据已持久化到 sqlineage 数据库")
+    print("\n✅ 数据已持久化到 sqlineage 数据库")
 
 
 if __name__ == "__main__":

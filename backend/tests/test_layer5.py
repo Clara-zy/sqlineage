@@ -1,6 +1,5 @@
 """Layer 5-8 测试 — 组合条件 / UNION / 窗口函数 / CTE"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 

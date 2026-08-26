@@ -1,6 +1,5 @@
 """root→middle 升级端到端测试"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 from app.upgrade_engine.engine import execute_upgrade

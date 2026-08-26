@@ -60,14 +60,6 @@ def graph(
                 if not sq_hashes:
                     return {"code": 0, "data": {"nodes": [], "edges": []}, "message": "ok"}
 
-                # 从子查询的 structure.fields 出发，BFS 收集所有可达字段
-                sq_placeholders = ",".join(["%s"] * len(sq_hashes))
-                cur.execute(
-                    f"SELECT structure FROM subqueries WHERE hash IN ({sq_placeholders})",
-                    sq_hashes,
-                )
-                sq_structures = [r["structure"] for r in cur.fetchall()]
-
                 # 收集所有可达的 field hash（先收集顶层子查询）
                 reachable = set()
                 sq_queue: list[str] = list(sq_hashes)
@@ -146,7 +138,7 @@ def graph(
             import json
             expr = json.loads(expr)
         op = expr.get("op", "?")
-        label = _node_label(f["field_type"], expr)
+        label = _node_label(expr)
         nodes.append({
             "id": f["hash"],
             "type": "fieldNode",
@@ -510,7 +502,7 @@ def node_detail(hash: str, user: dict = Depends(get_current_user)):
             {
                 "hash": r["hash"],
                 "field_type": r["field_type"],
-                "label": _node_label(r["field_type"],
+                "label": _node_label(
                     _json.loads(r["expression"]) if isinstance(r["expression"], str) else r["expression"]),
             }
             for r in cur.fetchall()
@@ -527,7 +519,7 @@ def node_detail(hash: str, user: dict = Depends(get_current_user)):
             {
                 "hash": r["hash"],
                 "field_type": r["field_type"],
-                "label": _node_label(r["field_type"],
+                "label": _node_label(
                     _json.loads(r["expression"]) if isinstance(r["expression"], str) else r["expression"]),
             }
             for r in cur.fetchall()
@@ -601,7 +593,7 @@ def clear(user: dict = Depends(get_current_user)):
     return {"code": 0, "data": None, "message": "ok"}
 
 
-def _node_label(field_type: str, expr: dict) -> str:
+def _node_label(expr: dict) -> str:
     op = expr.get("op", "?")
     if op == "column":
         return f"{expr.get('table', '')}.{expr.get('column', '')}"

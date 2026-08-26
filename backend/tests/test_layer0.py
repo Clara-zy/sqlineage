@@ -18,7 +18,7 @@ class TestLayer0:
         assert result["new_fields"] >= 2
 
     def test_idempotent(self, clean_db):
-        r1 = build_lineage("SELECT trans_id, trans_at FROM trans_flow")
+        build_lineage("SELECT trans_id, trans_at FROM trans_flow")
         r2 = build_lineage("SELECT trans_id, trans_at FROM trans_flow")
         assert r2["new_fields"] >= 0
         assert r2["new_subqueries"] >= 0

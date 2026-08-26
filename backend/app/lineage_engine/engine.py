@@ -49,7 +49,6 @@ def build_lineage(sql: str, sink_table: str | None = None, comment: str | None =
             if isinstance(node, exp.Select):
                 select_ast = node
                 break
-        build_alias_map(select_ast, ctx)
         sq_hash, _ = build_subquery_select(select_ast, ctx)
 
     # 统计结果

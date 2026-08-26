@@ -1,6 +1,5 @@
 """枚举值测试 — DDL COMMENT ENUM() 解析 / 继承 / 校验"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 from app.field_enums import (
@@ -108,7 +107,8 @@ class TestEnumValidate:
 
     def test_eq_with_enum_warns_on_build(self, clean_db):
         """WHERE trans_status = 'PENDING' 构建时产生枚举警告"""
-        import io, sys
+        import io
+        import sys
         captured = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = captured
@@ -121,7 +121,8 @@ class TestEnumValidate:
 
     def test_eq_with_valid_enum_no_warn(self, clean_db):
         """WHERE trans_status = 'SUCCESS' 不产生警告"""
-        import io, sys
+        import io
+        import sys
         captured = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = captured

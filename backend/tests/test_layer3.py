@@ -1,6 +1,5 @@
 """Layer 3 测试 — 子查询嵌套"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 

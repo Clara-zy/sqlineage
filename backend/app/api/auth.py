@@ -8,7 +8,6 @@ from pydantic import BaseModel
 import bcrypt
 
 from app.database import get_cursor
-from app.config import settings
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 

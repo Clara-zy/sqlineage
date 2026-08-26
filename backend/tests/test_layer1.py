@@ -1,6 +1,5 @@
 """Layer 1 测试 — 单表表达式: nvl / round / concat / CAST / 算术运算"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 

@@ -59,7 +59,7 @@ class TestView:
                 (sq_hash,),
             )
 
-        r1 = build_lineage("SELECT mchnt_cd FROM mydb.v_test")
+        build_lineage("SELECT mchnt_cd FROM mydb.v_test")
         r2 = build_lineage("SELECT trans_cnt FROM mydb.v_test")
         assert r2["new_fields"] >= 0
 

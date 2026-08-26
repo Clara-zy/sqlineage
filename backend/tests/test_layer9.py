@@ -1,6 +1,5 @@
 """Layer 9+ 测试 — JOIN 包装 / 违规校验 / LATERAL VIEW / 日期函数"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 

@@ -1,6 +1,5 @@
 """Phase 0 入参校验"""
 
-import sqlglot
 import sqlglot.expressions as exp
 
 

@@ -1,6 +1,5 @@
 """Layer 2 测试 — 聚合 + GROUP BY + 两表 LEFT JOIN"""
 
-import pytest
 from app.database import get_cursor
 from app.lineage_engine.engine import build_lineage
 
@@ -57,7 +56,7 @@ class TestLayer2Agg:
     def test_aggregate_idempotent(self, clean_db):
         """同一聚合查询复用"""
         sql = "SELECT sum(trans_at) AS total FROM trans_flow"
-        r1 = build_lineage(sql)
+        build_lineage(sql)
         r2 = build_lineage(sql)
         assert r2["new_fields"] >= 0
 
