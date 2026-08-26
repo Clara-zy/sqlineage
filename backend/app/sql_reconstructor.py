@@ -380,11 +380,119 @@ def _f(fh, exprs, cur, aliases=None):
 # 拓扑驱动完整还原
 # ════════════════════════════════════════
 
-def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
-    """将单个字段还原为最小完整 SELECT。
+# 条件/表达式节点（作为完整查询时投影用占位符，由下游替换）
+_COND_OPS = {"eq", "neq", "gt", "lt", "gte", "lte", "in", "notin",
+             "and", "or", "div", "mul", "add", "sub"}
+_PLACEHOLDER = "__SQ_PROJ__"
 
-    声明式框架：从叶子节点 base → 逐层向上 wrap，参数由拓扑传递。
+
+def _assemble_select(exposed, projection, col_table=""):
+    """把 exposed 结构上下文组装成最小 SELECT 的行列表。
+
+    projection: SELECT 的投影列（可为占位符）；col_table: 字段所属表（优先作 FROM 基表）。
     """
+    tables = sorted(exposed.get("tables", set()))
+    joins = list(exposed.get("joins", []))
+    join_tables = {jt for jt, _ in joins}
+    wheres = list(exposed.get("where", set()))
+    havings = list(exposed.get("having", set()))
+    groupbys = list(exposed.get("groupby", set()))
+    orderbys = list(exposed.get("orderby", set()))
+    limit = exposed.get("limit")
+
+    if col_table and col_table in tables:
+        base_table = col_table
+    else:
+        leftover = sorted(set(tables) - join_tables)
+        base_table = leftover[0] if leftover else (tables[0] if tables else "?")
+
+    # SELECT: groupby keys 在前，projection 在后（去重）
+    select_cols = sorted(exposed.get("groupby", set()))
+    if projection not in select_cols:
+        select_cols.append(projection)
+    lines = [f"select {', '.join(select_cols)}"]
+    lines.append(f"from {base_table}" if tables else "from ?")
+    for right_table, on_sql in joins:
+        lines.append(f"  join {right_table} on {on_sql}")
+
+    if wheres:
+        lines.append(f"where {' AND '.join(wheres)}")
+    if groupbys:
+        lines.append(f"group by {', '.join(sorted(groupbys))}")
+    if havings:
+        lines.append(f"having {' AND '.join(havings)}")
+    if orderbys:
+        lines.append(f"order by {', '.join(orderbys)}")
+    if limit is not None:
+        lines.append(f"limit {limit}")
+
+    return lines
+
+
+def _condition_query(fh, exprs, cur, col, exposed):
+    """条件节点的完整查询：grouped（聚合/分组）操作数展开为子查询，条件引用其输出列。
+
+    无 grouped 操作数时退化为平铺条件进 where（简单列/字面量比较）。
+    """
+    e = _load(fh, exprs, cur)
+    subqueries = []  # [(alias, subquery_sql)]
+    ref_map = {}     # child_hash -> 引用串
+
+    for h in _child_hashes(e):
+        child_col, child_exp = _compute_base(h, exprs, cur)
+        if child_exp.get("groupby"):
+            child_e = _load(h, exprs, cur)
+            alias = f"sub{len(subqueries)}"
+            if child_e.get("op") == "alias" and child_e.get("alias_name"):
+                output_col = child_e["alias_name"]
+            else:
+                output_col = child_col
+            sub_sql = _field_query(h, exprs, cur)
+            subqueries.append((alias, sub_sql))
+            ref_map[h] = f"{alias}.{output_col}"
+        else:
+            ref_map[h] = child_col
+
+    cond_sql = _render(e, ref_map, exprs, cur)
+
+    if not subqueries:
+        exposed = dict(exposed)
+        exposed["where"] = {col} | exposed.get("where", set())
+        return "\n".join(_assemble_select(exposed, _PLACEHOLDER, ""))
+
+    lines = [f"select {_PLACEHOLDER}"]
+    from_parts = []
+    for alias, sub_sql in subqueries:
+        indented = "\n".join("  " + line for line in sub_sql.split("\n"))
+        from_parts.append(f"(\n{indented}\n) {alias}")
+    lines.append("from " + ", ".join(from_parts))
+    lines.append(f"where {cond_sql}")
+    return "\n".join(lines)
+
+
+def _field_query(fh, exprs, cur, projection=None):
+    """递归生成字段的最小完整查询。
+
+    projection=None 时按节点类型决定：条件/表达式走 _condition_query，alias 用 `col AS name`，其余用字段 col。
+    """
+    col, exposed = _compute_base(fh, exprs, cur)
+    base_e = _load(fh, exprs, cur)
+    op = base_e.get("op", "") if base_e else ""
+
+    if projection is None:
+        if op in _COND_OPS:
+            return _condition_query(fh, exprs, cur, col, exposed)
+        elif op == "alias" and base_e.get("alias_name"):
+            projection = f"{col} AS {base_e['alias_name']}"
+        else:
+            projection = col
+
+    col_table = base_e.get("table", "").split(".")[-1] if op == "column" else ""
+    return "\n".join(_assemble_select(exposed, projection, col_table))
+
+
+def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
+    """将单个字段还原为最小完整 SELECT（薄封装，递归组装在 _field_query）。"""
     with get_cursor() as cur:
         exprs: dict[str, dict] = {}
 
@@ -405,63 +513,7 @@ def field_to_sql_full(fh: str, sq_hash: str | None = None) -> str:
         for h in extra:
             _bfs([h], exprs, cur)
 
-        # ── Step 1: 从叶子找 base ──
-        _, exposed = _compute_base(fh, exprs, cur)
-
-        # ── Step 2: 组装 SQL ──
-        # base 已经递归包含所有下层信息
-        # 条件/表达式节点 → 不包 SELECT，直接返回表达式片段
-        _COND_OPS = {"eq", "neq", "gt", "lt", "gte", "lte", "in", "notin",
-                     "and", "or", "div", "mul", "add", "sub"}
-        base_e = _load(fh, exprs, cur)
-        if base_e and base_e.get("op") in _COND_OPS:
-            return exposed["col"]
-
-        # 顶层 alias：在 SELECT 层体现 AS 别名（_compute_base 对 alias 透明，避免嵌套污染比较）
-        if base_e and base_e.get("op") == "alias" and base_e.get("alias_name"):
-            exposed["col"] = f"{exposed['col']} AS {base_e['alias_name']}"
-
-        tables = sorted(exposed.get("tables", set()))
-        joins = list(exposed.get("joins", []))
-        join_tables = {jt for jt, _ in joins}
-        wheres = list(exposed.get("where", set()))
-        havings = list(exposed.get("having", set()))
-        groupbys = list(exposed.get("groupby", set()))
-        orderbys = list(exposed.get("orderby", set()))
-        limit = exposed.get("limit")
-
-        # FROM 基表：优先取列所属表，否则取未被 JOIN 覆盖的表
-        base_e = _load(fh, exprs, cur)
-        col_table = ""
-        if base_e and base_e.get("op") == "column":
-            col_table = base_e.get("table", "").split(".")[-1]
-        if col_table and col_table in tables:
-            base_table = col_table
-        else:
-            leftover = sorted(set(tables) - join_tables)
-            base_table = leftover[0] if leftover else (tables[0] if tables else "?")
-
-        # SELECT: groupby keys 在前，col 在后（去重）
-        select_cols = sorted(exposed.get("groupby", set()))
-        if exposed["col"] not in select_cols:
-            select_cols.append(exposed["col"])
-        lines = [f"select {', '.join(select_cols)}"]
-        lines.append(f"from {base_table}" if tables else "from ?")
-        for right_table, on_sql in joins:
-            lines.append(f"  join {right_table} on {on_sql}")
-
-        if wheres:
-            lines.append(f"where {' AND '.join(wheres)}")
-        if groupbys:
-            lines.append(f"group by {', '.join(sorted(groupbys))}")
-        if havings:
-            lines.append(f"having {' AND '.join(havings)}")
-        if orderbys:
-            lines.append(f"order by {', '.join(orderbys)}")
-        if limit is not None:
-            lines.append(f"limit {limit}")
-
-        return "\n".join(lines)
+        return _field_query(fh, exprs, cur)
 
 
 def _compute_base(fh, exprs, cur):

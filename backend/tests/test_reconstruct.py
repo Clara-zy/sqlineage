@@ -140,3 +140,33 @@ class TestClassification:
         trans_sql = field_to_sql_full(struct["alias_map"]["trans_id"], sq_hash)
         assert "join" in trans_sql
         assert "where dim_mchnt.mchnt_nm = 'X'" in trans_sql
+
+    def test_condition_node_full_query(self, clean_db):
+        """条件节点（gt 等）应还原成完整查询（占位符投影 + FROM + WHERE），而非平铺片段"""
+        build_lineage("SELECT trans_id FROM trans_flow WHERE trans_at > 100")
+        with get_cursor() as cur:
+            cur.execute("SELECT hash FROM fields WHERE expression ->> 'op' = 'gt'")
+            row = cur.fetchone()
+            assert row is not None
+            gt_hash = row["hash"]
+        gt_sql = field_to_sql_full(gt_hash)
+        assert gt_sql.startswith("select ")
+        assert "__SQ_PROJ__" in gt_sql
+        assert "from trans_flow" in gt_sql
+        assert "where trans_flow.trans_at > 100" in gt_sql
+
+    def test_condition_grouped_operand_subquery(self, clean_db):
+        """条件操作数是分组/聚合字段时，应展开成子查询并引用其输出列，而非拍平"""
+        build_lineage(
+            "SELECT a.cnt FROM (SELECT mchnt_cd, count(1) AS cnt FROM trans_flow "
+            "GROUP BY mchnt_cd) a WHERE a.cnt > 5"
+        )
+        with get_cursor() as cur:
+            cur.execute("SELECT hash FROM fields WHERE expression ->> 'op' = 'gt'")
+            row = cur.fetchone()
+            assert row is not None
+            gt_hash = row["hash"]
+        gt_sql = field_to_sql_full(gt_hash)
+        assert "from (" in gt_sql
+        assert "COUNT(trans_flow.*) AS cnt" in gt_sql
+        assert "where sub0.cnt > 5" in gt_sql
