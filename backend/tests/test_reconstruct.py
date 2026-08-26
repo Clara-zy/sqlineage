@@ -197,3 +197,22 @@ class TestClassification:
         assert "COUNT(trans_flow.*) AS cnt" in sql
         assert "where sub0.cnt > 5" in sql
         assert "HAVING" not in sql
+
+    def test_group_filter_merges_condition_aggregates(self, clean_db):
+        """组过滤条件引用其它聚合时，子查询应合并所有聚合"""
+        build_lineage(
+            "SELECT a.total_at FROM (SELECT mchnt_cd, count(1) AS total_cnt, "
+            "sum(trans_at) AS total_at FROM trans_flow GROUP BY mchnt_cd) a "
+            "WHERE a.total_cnt > 10"
+        )
+        with get_cursor() as cur:
+            cur.execute("SELECT hash FROM fields WHERE expression ->> 'op' = 'where'")
+            hashes = [r["hash"] for r in cur.fetchall()]
+
+        found = False
+        for h in hashes:
+            sql = field_to_sql_full(h)
+            if "AS total_at" in sql and "AS total_cnt" in sql and "where sub0.total_cnt > 10" in sql:
+                found = True
+                break
+        assert found, "组过滤应把条件引用的其它聚合合并进子查询"

@@ -456,35 +456,49 @@ def _is_grouped(h, exprs, cur):
 
 
 def _where_query(fh, exprs, cur):
-    """where 包裹 group 过滤：去糖成「子查询 + WHERE」。"""
+    """where 包裹 group 过滤：去糖成「子查询 + WHERE」。
+
+    子查询 = 合并「投影聚合 + 条件引用的聚合」的聚合查询，条件引用子查询输出列。
+    """
     e = _load(fh, exprs, cur)
     proj_h = e["args"][0]["hash"]
     cond_h = e.get("condition", "")
-    proj_e = _load(proj_h, exprs, cur)
     cond_e = _load(cond_h, exprs, cur)
 
     alias = "sub0"
     seed_map = {}
-    sub_sql = None
+    agg_cols = []   # 子查询 SELECT 列（含别名）
+    sub_exp = None  # 子查询 exposed（取自第一个聚合）
+    seen = set()
 
+    def register_agg(h):
+        nonlocal sub_exp
+        if h in seen:
+            return
+        seen.add(h)
+        h_e = _load(h, exprs, cur)
+        h_col, h_exp = _compute_base(h, exprs, cur)
+        if h_e.get("op") == "alias" and h_e.get("alias_name"):
+            out_col = h_e["alias_name"]
+        else:
+            out_col = f"_agg{len(agg_cols)}"
+        if sub_exp is None:
+            sub_exp = h_exp
+        agg_cols.append(f"{h_col} AS {out_col}")
+        seed_map[h] = f"{alias}.{out_col}"
+        if h_e.get("op") == "alias" and h_e.get("args"):
+            inner_h = h_e["args"][0]["hash"]
+            seed_map[inner_h] = f"{alias}.{out_col}"
+            seen.add(inner_h)
+
+    # 投影是聚合则纳入，再纳入条件引用的聚合
     if _is_grouped(proj_h, exprs, cur):
-        # 投影是聚合：子查询用投影的查询，聚合 → 投影别名
-        sub_sql = _field_query(proj_h, exprs, cur)
-        if proj_e.get("op") == "alias" and proj_e.get("alias_name"):
-            seed_map[proj_e["args"][0]["hash"]] = f"{alias}.{proj_e['alias_name']}"
-    else:
-        # 投影是 group key：子查询用条件里第一个聚合的查询，聚合用生成列名
-        for h in _child_hashes(cond_e):
-            if _is_grouped(h, exprs, cur):
-                h_e = _load(h, exprs, cur)
-                agg_col = _compute_base(h, exprs, cur)[0]
-                if h_e.get("op") == "alias" and h_e.get("alias_name"):
-                    out_col = h_e["alias_name"]
-                else:
-                    out_col = "_agg0"
-                seed_map[h] = f"{alias}.{out_col}"
-                sub_sql = _field_query(h, exprs, cur, projection=f"{agg_col} AS {out_col}")
-                break
+        register_agg(proj_h)
+    for h in _child_hashes(cond_e):
+        if _is_grouped(h, exprs, cur):
+            register_agg(h)
+
+    sub_sql = "\n".join(_assemble_select(sub_exp or {}, ", ".join(agg_cols), ""))
 
     ref_map = {}
     for h in _child_hashes(cond_e):
@@ -494,7 +508,7 @@ def _where_query(fh, exprs, cur):
             ref_map[h] = _compute_base(h, exprs, cur)[0]
     cond_sql = _render(cond_e, ref_map, exprs, cur)
 
-    indented = "\n".join("  " + line for line in (sub_sql or "select * from ?").split("\n"))
+    indented = "\n".join("  " + line for line in sub_sql.split("\n"))
     return "\n".join([
         f"select {_PLACEHOLDER}",
         f"from (\n{indented}\n) {alias}",
