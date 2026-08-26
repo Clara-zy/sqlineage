@@ -142,7 +142,7 @@ class TestClassification:
         assert "where dim_mchnt.mchnt_nm = 'X'" in trans_sql
 
     def test_condition_node_full_query(self, clean_db):
-        """条件节点（gt 等）应还原成完整查询（占位符投影 + FROM + WHERE），而非平铺片段"""
+        """条件节点（gt 等）应还原成完整查询（投影候选 + FROM + WHERE），而非平铺片段"""
         build_lineage("SELECT trans_id FROM trans_flow WHERE trans_at > 100")
         with get_cursor() as cur:
             cur.execute("SELECT hash FROM fields WHERE expression ->> 'op' = 'gt'")
@@ -151,7 +151,7 @@ class TestClassification:
             gt_hash = row["hash"]
         gt_sql = field_to_sql_full(gt_hash)
         assert gt_sql.startswith("select ")
-        assert "__SQ_PROJ__" in gt_sql
+        assert "select trans_flow.trans_at" in gt_sql
         assert "from trans_flow" in gt_sql
         assert "where trans_flow.trans_at > 100" in gt_sql
 
@@ -170,6 +170,7 @@ class TestClassification:
         assert "from (" in gt_sql
         assert "COUNT(trans_flow.*) AS cnt" in gt_sql
         assert "where sub0.cnt > 5" in gt_sql
+        assert "select sub0.cnt" in gt_sql
 
     def test_having_unsugars_to_subquery(self, clean_db):
         """HAVING 去糖成「子查询 + WHERE」，且不再产生 having op"""

@@ -434,12 +434,16 @@ def _condition_query(fh, exprs, cur, col, exposed):
 
     cond_sql = _render(e, ref_map, exprs, cur)
 
+    # 投影候选 = 非字面量操作数（字段），而非普通占位符
+    proj_candidates = [ref_map[h] for h in _child_hashes(e) if exprs.get(h, {}).get("op") != "literal"]
+    projection = ", ".join(proj_candidates) if proj_candidates else _PLACEHOLDER
+
     if not subqueries:
         exposed = dict(exposed)
         exposed["where"] = {col} | exposed.get("where", set())
-        return "\n".join(_assemble_select(exposed, _PLACEHOLDER, ""))
+        return "\n".join(_assemble_select(exposed, projection, ""))
 
-    lines = [f"select {_PLACEHOLDER}"]
+    lines = [f"select {projection}"]
     from_parts = []
     for alias, sub_sql in subqueries:
         indented = "\n".join("  " + line for line in sub_sql.split("\n"))
@@ -500,6 +504,13 @@ def _where_query(fh, exprs, cur):
 
     sub_sql = "\n".join(_assemble_select(sub_exp or {}, ", ".join(agg_cols), ""))
 
+    # 本字段在子查询里的输出引用（占位符在此还原为实际投影）
+    if proj_h in seed_map:
+        projection = seed_map[proj_h]
+    else:
+        proj_col = _compute_base(proj_h, exprs, cur)[0]
+        projection = f"{alias}.{proj_col.split('.')[-1]}"
+
     ref_map = {}
     for h in _child_hashes(cond_e):
         if h in seed_map:
@@ -510,7 +521,7 @@ def _where_query(fh, exprs, cur):
 
     indented = "\n".join("  " + line for line in sub_sql.split("\n"))
     return "\n".join([
-        f"select {_PLACEHOLDER}",
+        f"select {projection}",
         f"from (\n{indented}\n) {alias}",
         f"where {cond_sql}",
     ])
