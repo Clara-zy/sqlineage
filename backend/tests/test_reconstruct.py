@@ -170,3 +170,30 @@ class TestClassification:
         assert "from (" in gt_sql
         assert "COUNT(trans_flow.*) AS cnt" in gt_sql
         assert "where sub0.cnt > 5" in gt_sql
+
+    def test_having_unsugars_to_subquery(self, clean_db):
+        """HAVING 去糖成「子查询 + WHERE」，且不再产生 having op"""
+        build_lineage(
+            "SELECT mchnt_cd, count(1) AS cnt FROM trans_flow "
+            "GROUP BY mchnt_cd HAVING count(1) > 5"
+        )
+        with get_cursor() as cur:
+            cur.execute("SELECT count(*) FROM fields WHERE expression ->> 'op' = 'having'")
+            assert cur.fetchone()["count"] == 0
+
+            cur.execute(
+                "SELECT f.hash FROM fields f "
+                "JOIN field_references fr ON fr.referrer_hash = f.hash "
+                "JOIN fields c ON c.hash = fr.referenced_hash "
+                "WHERE f.expression ->> 'op' = 'where' "
+                "AND c.expression ->> 'op' = 'alias' "
+                "AND c.expression ->> 'alias_name' = 'cnt'"
+            )
+            row = cur.fetchone()
+            assert row is not None
+            cnt_hash = row["hash"]
+
+        sql = field_to_sql_full(cnt_hash)
+        assert "COUNT(trans_flow.*) AS cnt" in sql
+        assert "where sub0.cnt > 5" in sql
+        assert "HAVING" not in sql

@@ -50,15 +50,15 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     saved_proj = ctx.projection_map
     ctx.projection_map = dict(alias_to_hash)
 
-    # 6. HAVING 包裹每个投影列
+    # 6. HAVING 包裹每个投影列 → 去 having 后统一为 where（组过滤，时机由 DAG 位置承载）
     current_having = ctx.pending_having
     if current_having:
         from app.field_enums import inherit_enum
         wrapped = []
         for fh in field_hashes:
-            having_expr = {"op": "having", "args": [{"hash": fh}], "condition": current_having}
-            wh = compute_hash(having_expr)
-            ctx.upsert_field(wh, "expression", having_expr)
+            where_expr = {"op": "where", "args": [{"hash": fh}], "condition": current_having}
+            wh = compute_hash(where_expr)
+            ctx.upsert_field(wh, "expression", where_expr)
             ctx.upsert_field_reference(fh, wh)
             ctx.upsert_field_reference(current_having, wh)
             inherit_enum(fh, wh)

@@ -40,8 +40,6 @@ def _leaf_ts(e, exprs, cur):
     return "CURRENT_TIMESTAMP", {"col": "CURRENT_TIMESTAMP", "tables": set()}
 
 
-# ── 特殊渲染函数（返回 SQL 片段，_f 消费）──
-
 # ── 特殊渲染函数（返回 SQL 片段，消费 child_cols，不再递归）──
 
 def _r_in(e, child_cols, exprs, cur):
@@ -172,19 +170,6 @@ def _groupby_base(fh, e, exprs, cur):
         "groupby": key_sqls | child_exp.get("groupby", set()),
     }
 
-def _having_base(fh, e, exprs, cur):
-    args = e.get("args", [])
-    if not args:
-        return "?", {"col": "?", "tables": set()}
-    child_sql, child_exp = _compute_base(args[0]["hash"], exprs, cur)
-    cond_h = e.get("condition", "")
-    if not cond_h:
-        return child_sql, child_exp
-    cond_sql, cond_exp = _compute_base(cond_h, exprs, cur)
-    result = _merge_exposed(child_exp, cond_exp)
-    result["having"] = {cond_sql} | result.get("having", set())
-    return child_sql, result
-
 def _limt_base(fh, e, exprs, cur):
     args = e.get("args", [])
     if not args:
@@ -252,7 +237,6 @@ _SPEC = {
     # 结构（_f 穿透 args[0]，_compute_base 走 _STRUCTURAL）
     "join": ("penetrate", None, "structural"),
     "where": ("penetrate", None, "structural"),
-    "having": ("penetrate", None, "structural"),
     "groupby": ("penetrate", None, "structural"),
     "limt": ("penetrate", None, "structural"),
 }
@@ -263,7 +247,6 @@ _DEFAULT_SPEC = ("prefix", None, "merge")
 _STRUCTURAL = {
     "join": _join_base,
     "where": _where_base,
-    "having": _having_base,
     "groupby": _groupby_base,
     "limt": _limt_base,
 }
@@ -310,11 +293,10 @@ def _merge_joins(*join_lists):
 
 
 def _merge_exposed(base, extra):
-    """合并两个 exposed dict：tables/where/having/groupby 取并集，joins 去重保序"""
+    """合并两个 exposed dict：tables/where/groupby 取并集，joins 去重保序"""
     result = dict(base)
     result["tables"] = base.get("tables", set()) | extra.get("tables", set())
     result["where"] = base.get("where", set()) | extra.get("where", set())
-    result["having"] = base.get("having", set()) | extra.get("having", set())
     result["groupby"] = base.get("groupby", set()) | extra.get("groupby", set())
     result["joins"] = _merge_joins(base.get("joins", []), extra.get("joins", []))
     return result
@@ -395,7 +377,6 @@ def _assemble_select(exposed, projection, col_table=""):
     joins = list(exposed.get("joins", []))
     join_tables = {jt for jt, _ in joins}
     wheres = list(exposed.get("where", set()))
-    havings = list(exposed.get("having", set()))
     groupbys = list(exposed.get("groupby", set()))
     orderbys = list(exposed.get("orderby", set()))
     limit = exposed.get("limit")
@@ -419,8 +400,6 @@ def _assemble_select(exposed, projection, col_table=""):
         lines.append(f"where {' AND '.join(wheres)}")
     if groupbys:
         lines.append(f"group by {', '.join(sorted(groupbys))}")
-    if havings:
-        lines.append(f"having {' AND '.join(havings)}")
     if orderbys:
         lines.append(f"order by {', '.join(orderbys)}")
     if limit is not None:
@@ -470,6 +449,59 @@ def _condition_query(fh, exprs, cur, col, exposed):
     return "\n".join(lines)
 
 
+def _is_grouped(h, exprs, cur):
+    """字段是否分组/聚合（exposed 带 groupby）。"""
+    _, child_exp = _compute_base(h, exprs, cur)
+    return bool(child_exp.get("groupby"))
+
+
+def _where_query(fh, exprs, cur):
+    """where 包裹 group 过滤：去糖成「子查询 + WHERE」。"""
+    e = _load(fh, exprs, cur)
+    proj_h = e["args"][0]["hash"]
+    cond_h = e.get("condition", "")
+    proj_e = _load(proj_h, exprs, cur)
+    cond_e = _load(cond_h, exprs, cur)
+
+    alias = "sub0"
+    seed_map = {}
+    sub_sql = None
+
+    if _is_grouped(proj_h, exprs, cur):
+        # 投影是聚合：子查询用投影的查询，聚合 → 投影别名
+        sub_sql = _field_query(proj_h, exprs, cur)
+        if proj_e.get("op") == "alias" and proj_e.get("alias_name"):
+            seed_map[proj_e["args"][0]["hash"]] = f"{alias}.{proj_e['alias_name']}"
+    else:
+        # 投影是 group key：子查询用条件里第一个聚合的查询，聚合用生成列名
+        for h in _child_hashes(cond_e):
+            if _is_grouped(h, exprs, cur):
+                h_e = _load(h, exprs, cur)
+                agg_col = _compute_base(h, exprs, cur)[0]
+                if h_e.get("op") == "alias" and h_e.get("alias_name"):
+                    out_col = h_e["alias_name"]
+                else:
+                    out_col = "_agg0"
+                seed_map[h] = f"{alias}.{out_col}"
+                sub_sql = _field_query(h, exprs, cur, projection=f"{agg_col} AS {out_col}")
+                break
+
+    ref_map = {}
+    for h in _child_hashes(cond_e):
+        if h in seed_map:
+            ref_map[h] = seed_map[h]
+        else:
+            ref_map[h] = _compute_base(h, exprs, cur)[0]
+    cond_sql = _render(cond_e, ref_map, exprs, cur)
+
+    indented = "\n".join("  " + line for line in (sub_sql or "select * from ?").split("\n"))
+    return "\n".join([
+        f"select {_PLACEHOLDER}",
+        f"from (\n{indented}\n) {alias}",
+        f"where {cond_sql}",
+    ])
+
+
 def _field_query(fh, exprs, cur, projection=None):
     """递归生成字段的最小完整查询。
 
@@ -482,6 +514,8 @@ def _field_query(fh, exprs, cur, projection=None):
     if projection is None:
         if op in _COND_OPS:
             return _condition_query(fh, exprs, cur, col, exposed)
+        elif op == "where" and base_e.get("condition") and _is_grouped(base_e["condition"], exprs, cur):
+            return _where_query(fh, exprs, cur)
         elif op == "alias" and base_e.get("alias_name"):
             projection = f"{col} AS {base_e['alias_name']}"
         else:
@@ -533,7 +567,6 @@ def _compute_base(fh, exprs, cur):
         tables = set()
         wheres = set()
         joins = []
-        havings = set()
         groupbys = set()
         for h in _child_hashes(e):
             child_col, child_exp = _compute_base(h, exprs, cur)
@@ -541,7 +574,6 @@ def _compute_base(fh, exprs, cur):
             tables |= child_exp.get("tables", set())
             wheres |= child_exp.get("where", set())
             joins = _merge_joins(joins, child_exp.get("joins", []))
-            havings |= child_exp.get("having", set())
             groupbys |= child_exp.get("groupby", set())
         col = _render(e, child_cols, exprs, cur)
         return col, {
@@ -549,7 +581,6 @@ def _compute_base(fh, exprs, cur):
             "tables": tables,
             "where": wheres,
             "joins": joins,
-            "having": havings,
             "groupby": groupbys,
         }
     if prop == "aggregate":
@@ -626,7 +657,6 @@ def _select_sql(sq_hash, struct, cur):
 
     where_cond = _first_where(roots, exprs, cur)
     group_keys = _collect_keys(roots, exprs, cur)
-    having_cond = _first_having(roots, exprs, cur)
     order_exprs = _collect_orders(roots, exprs, cur)
     limit_val = _collect_limit(roots, exprs)
 
@@ -637,8 +667,6 @@ def _select_sql(sq_hash, struct, cur):
         lines.append(f"WHERE {where_cond}")
     if group_keys:
         lines.append(f"GROUP BY {', '.join(group_keys)}")
-    if having_cond:
-        lines.append(f"HAVING {having_cond}")
     if order_exprs:
         lines.append("ORDER BY " + ", ".join(order_exprs))
     if limit_val is not None:
@@ -731,16 +759,6 @@ def _first_where(roots, exprs, cur):
     for r in roots:
         e = exprs.get(r, {})
         if e.get("op") == "where":
-            cond = e.get("condition", "")
-            if cond:
-                return _f(cond, exprs, cur)
-    return None
-
-
-def _first_having(roots, exprs, cur):
-    for r in roots:
-        e = exprs.get(r, {})
-        if e.get("op") == "having":
             cond = e.get("condition", "")
             if cond:
                 return _f(cond, exprs, cur)
