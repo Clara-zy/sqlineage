@@ -170,7 +170,7 @@ class TestClassification:
         assert "from (" in gt_sql
         assert "COUNT(trans_flow.*) AS cnt" in gt_sql
         assert "where sub0.cnt > 5" in gt_sql
-        assert "select sub0.cnt" in gt_sql
+        assert "select __PROJ_ENUM__[mchnt_cd,cnt]" in gt_sql
 
     def test_having_unsugars_to_subquery(self, clean_db):
         """HAVING 去糖成「子查询 + WHERE」，且不再产生 having op"""

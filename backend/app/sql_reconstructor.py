@@ -434,14 +434,26 @@ def _condition_query(fh, exprs, cur, col, exposed):
 
     cond_sql = _render(e, ref_map, exprs, cur)
 
-    # 投影候选 = 非字面量操作数（字段），而非普通占位符
-    proj_candidates = [ref_map[h] for h in _child_hashes(e) if exprs.get(h, {}).get("op") != "literal"]
-    projection = ", ".join(proj_candidates) if proj_candidates else _PLACEHOLDER
-
     if not subqueries:
+        # 简单条件：投影候选 = 非字面量操作数
+        proj_candidates = [ref_map[h] for h in _child_hashes(e) if exprs.get(h, {}).get("op") != "literal"]
+        projection = ", ".join(proj_candidates) if proj_candidates else _PLACEHOLDER
         exposed = dict(exposed)
         exposed["where"] = {col} | exposed.get("where", set())
         return "\n".join(_assemble_select(exposed, projection, ""))
+
+    # grouped 条件：投影候选 = 枚举（group keys + 操作数输出列），供下游选择
+    enum_cols = []
+    for gk in sorted(exposed.get("groupby", set())):
+        enum_cols.append(gk.split(".")[-1])
+    for h in _child_hashes(e):
+        if exprs.get(h, {}).get("op") != "literal":
+            enum_cols.append(ref_map[h].split(".")[-1])
+    deduped = []
+    for c in enum_cols:
+        if c not in deduped:
+            deduped.append(c)
+    projection = f"__PROJ_ENUM__[{','.join(deduped)}]"
 
     lines = [f"select {projection}"]
     from_parts = []
