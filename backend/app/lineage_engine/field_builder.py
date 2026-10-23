@@ -84,6 +84,18 @@ def build_field(node: exp.Expression, ctx: BuildContext) -> str:
     elif isinstance(node, exp.Union):
         from app.lineage_engine.subquery_builder import build_subquery_union
         result = build_subquery_union(node, ctx)
+    elif isinstance(node, exp.Bracket):
+        result = build_function(node, ctx)  # a.arr[2] → op=bracket, args=[base, index]
+    elif isinstance(node, exp.Between):
+        result = build_function(node, ctx)  # x BETWEEN low AND high
+    elif isinstance(node, exp.Var):
+        result = build_keyword(node, ctx)  # 裸关键字（如 date_sub 的 DAY）
+    elif isinstance(node, (exp.Array, exp.VarMap)) and _is_const_container(node):
+        result = build_const_container(node, ctx)
+    elif isinstance(node, exp.Func):
+        # 兜底：sqlglot 的具名函数节点（Rand/Abs/Greatest/Power/... 视版本而变），
+        # 语义与 Anonymous 一致 —— 只有函数名不同，统一走通用参数提取 + prefix 渲染
+        result = build_function(node, ctx)
     else:
         raise UnsupportedExpression(f"不支持的表达式类型: {type(node).__name__}")
 
@@ -146,6 +158,7 @@ def _function_op(node: exp.Expression) -> str:
         "round": "round", "cast": "cast", "if": "if",
         "count": "count", "sum": "sum", "avg": "avg", "min": "min", "max": "max",
         "rownumber": "row_number", "explode": "explode", "split": "split",
+        "bracket": "bracket", "between": "between",
     }
     if type_name in _type_ops:
         return _type_ops[type_name]
@@ -441,6 +454,53 @@ def build_literal(node: exp.Literal, ctx: BuildContext) -> str:
     value = node.this
     type_name = "string" if node.is_string else "number"
     expression = {"op": "literal", "value": str(value), "type": type_name}
+    h = compute_hash(expression)
+    ctx.upsert_field(h, "literal", expression)
+    return h
+
+
+def build_keyword(node: exp.Var, ctx: BuildContext) -> str:
+    """裸关键字（sqlglot 的 Var，如 date_sub 的 DAY 单位）→ literal/keyword 节点"""
+    expression = {"op": "literal", "value": node.name, "type": "keyword"}
+    h = compute_hash(expression)
+    ctx.upsert_field(h, "literal", expression)
+    return h
+
+
+# ── 常量容器：array(...) / map(...) ──
+_CONST_LEAVES = (exp.Literal, exp.Null)
+
+
+def _is_const_container(node: exp.Expression) -> bool:
+    """容器内是否全为字面量（array/map 常量）。是则整体作为一个叶子节点。"""
+    for child in node.iter_expressions():
+        if isinstance(child, _CONST_LEAVES):
+            continue
+        if isinstance(child, (exp.Array, exp.VarMap)) and _is_const_container(child):
+            continue
+        return False
+    return True
+
+
+def _const_value(node: exp.Expression):
+    """常量容器的元素 → 可 JSON 序列化的值（嵌套保留）"""
+    if isinstance(node, exp.Null):
+        return None
+    if isinstance(node, exp.Literal):
+        return node.this if isinstance(node.this, str) else str(node.this)
+    if isinstance(node, exp.Array):
+        return [_const_value(c) for c in node.expressions]
+    return node.sql()
+
+
+def build_const_container(node: exp.Expression, ctx: BuildContext) -> str:
+    """array/map 常量 → 单个字段节点（元素是数据不是血缘，不展开成子节点）"""
+    if isinstance(node, exp.VarMap):
+        keys = [_const_value(k) for k in (node.args.get("keys") or [])]
+        vals = [_const_value(v) for v in (node.args.get("values") or [])]
+        expression = {"op": "map_literal", "entries": [[k, v] for k, v in zip(keys, vals)]}
+    else:
+        expression = {"op": "array_literal", "values": [_const_value(c) for c in node.expressions]}
     h = compute_hash(expression)
     ctx.upsert_field(h, "literal", expression)
     return h

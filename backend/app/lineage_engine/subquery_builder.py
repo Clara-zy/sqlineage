@@ -13,6 +13,13 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     HAVING 在聚合后，作为子查询级过滤存入 structure。
     """
     from app.lineage_engine.field_builder import build_alias_map
+
+    # 词法作用域：快照别名相关的上下文，退出时恢复
+    # （多层嵌套里 a/b/x 这类短别名会被反复复用，全局表会互相覆盖）
+    saved_alias_map = dict(ctx.alias_map)
+    saved_subquery_map = dict(ctx.subquery_map)
+    saved_join_wraps = {k: list(v) for k, v in ctx.join_wraps.items()}
+    saved_from_alias = ctx.from_alias
     build_alias_map(node, ctx)
 
     # 1. 构建 WHERE，存入 ctx.pending_where（列引用时自动应用）
@@ -104,11 +111,18 @@ def build_subquery_select(node: exp.Select, ctx: BuildContext) -> tuple[str, dic
     inner_sqs = list(ctx.inner_subqueries)
     ctx.inner_subqueries.clear()
 
-    # 恢复
+    # 恢复（原地恢复，保持 dict 对象身份：调用方可能持有 ctx.alias_map 引用）
     ctx.group_keys = saved_group_keys
     ctx.pending_where = saved_where
     ctx.pending_having = saved_having
     ctx.projection_map = saved_proj
+    ctx.alias_map.clear()
+    ctx.alias_map.update(saved_alias_map)
+    ctx.subquery_map.clear()
+    ctx.subquery_map.update(saved_subquery_map)
+    ctx.join_wraps.clear()
+    ctx.join_wraps.update(saved_join_wraps)
+    ctx.from_alias = saved_from_alias
 
     structure = {"type": "select", "fields": field_hashes, "alias_map": alias_to_hash}
     if inner_sqs:

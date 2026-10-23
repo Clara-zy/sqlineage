@@ -15,10 +15,19 @@ from app.lineage_engine.field_builder import build_field
 from app.lineage_engine.subquery_builder import build_subquery_select
 
 
-def build_lineage(sql: str, sink_table: str | None = None, comment: str | None = None) -> dict:
-    """完整血缘构建流程"""
+def build_lineage(
+    sql: str,
+    sink_table: str | None = None,
+    comment: str | None = None,
+    dialect: str | None = None,
+) -> dict:
+    """完整血缘构建流程
+
+    dialect: sqlglot 方言（如 "hive" / "mysql"）。
+        None = 沿用旧行为（解析不带方言、qualify 用 mysql）。
+    """
     # Phase 0: 入参校验
-    ast = sqlglot.parse_one(sql)
+    ast = sqlglot.parse_one(sql) if dialect is None else sqlglot.parse_one(sql, dialect=dialect)
 
     ctx = BuildContext()
     validate_join_rules(ast)
@@ -26,7 +35,7 @@ def build_lineage(sql: str, sink_table: str | None = None, comment: str | None =
 
     # Phase 2: 标准化
     schema = build_schema_dict()
-    normalized_ast = normalize(sql, schema)
+    normalized_ast = normalize(sql, schema, dialect=dialect)
 
     # 统计构建前的节点数
     with get_cursor() as cur:
@@ -109,7 +118,17 @@ def _bind_sink_table(sink_ref: str, select_ast, sq_hash: str, ctx: BuildContext)
         raise ValidationError(49003, f"sink 表 {sink_ref} 不存在")
 
     tc_list = ctx.get_table_columns(table["id"])
-    projection_count = len(select_ast.expressions)
+
+    # 投影 hash 直接取自子查询结构（已构建完成，顺序即投影顺序）
+    # 不能在这里重跑 build_field：子查询构建结束时别名表已按词法作用域回收
+    with get_cursor() as cur:
+        cur.execute("SELECT structure FROM subqueries WHERE hash = %s", (sq_hash,))
+        row = cur.fetchone()
+    if not row:
+        raise ValidationError(49006, f"子查询 {sq_hash} 不存在")
+    field_hashes = row["structure"].get("fields") or []
+
+    projection_count = len(field_hashes)
     if projection_count != len(tc_list):
         raise ValidationError(
             49006,
@@ -126,9 +145,8 @@ def _bind_sink_table(sink_ref: str, select_ast, sq_hash: str, ctx: BuildContext)
     ctx.update_table_input_subquery(table["id"], sq_hash)
 
     new_hashes = []
-    for i, expr in enumerate(select_ast.expressions):
+    for i, field_h in enumerate(field_hashes):
         tc = tc_list[i]
-        field_h = build_field(expr, ctx)
         ctx.deprecate_active_mappings(tc["id"], "新血缘构建")
         ctx.insert_column_mapping(tc["id"], field_h)
         ctx.update_table_column_field_hash(tc["id"], field_h)

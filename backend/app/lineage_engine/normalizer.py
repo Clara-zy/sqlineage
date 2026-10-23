@@ -59,9 +59,12 @@ def build_schema_dict() -> dict:
     return schema
 
 
-def normalize(sql: str, schema: dict) -> sqlglot.Expression:
-    """对 SQL 做标准化：RIGHT/FULL JOIN → LEFT/UNION / qualify → dnf → simplify"""
-    ast = sqlglot.parse_one(sql)
+def normalize(sql: str, schema: dict, dialect: str | None = None) -> sqlglot.Expression:
+    """对 SQL 做标准化：RIGHT/FULL JOIN → LEFT/UNION / qualify → dnf → simplify
+
+    dialect: sqlglot 方言。None = 旧行为（解析不带方言、qualify 用 mysql）。
+    """
+    ast = sqlglot.parse_one(sql) if dialect is None else sqlglot.parse_one(sql, dialect=dialect)
 
     # RIGHT JOIN → LEFT JOIN（交换 FROM 和 JOIN 表）
     ast = _transform_right_joins(ast)
@@ -69,7 +72,7 @@ def normalize(sql: str, schema: dict) -> sqlglot.Expression:
     ast = _transform_full_joins(ast)
 
     if schema:
-        ast = qualify(ast, schema=schema, dialect="mysql")
+        ast = qualify(ast, schema=schema, dialect=dialect or "mysql")
     ast = norm_pass(ast, dnf=True)
     ast = simplify(ast)
 
