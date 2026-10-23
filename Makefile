@@ -1,4 +1,4 @@
-.PHONY: install dev backend frontend stop db-init import-tests bird-import test lint clean
+.PHONY: install dev backend frontend stop db-init import-tests bird-import platform-import preprocess-sql test lint clean
 
 PYTHON = python3.13
 VENV = backend/.venv
@@ -41,6 +41,14 @@ import-tests:
 bird-import:
 	@echo "Importing BIRD test cases from resource/BIRD_SUBSET/dev.json..."
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/bird_import.py
+
+platform-import:
+	@echo "Importing platform schema from resource/UP_SUBSET/platform_schema..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/platform_import.py
+
+preprocess-sql:
+	@echo "Cleaning production Hive SQL → *.clean.sql..."
+	env PYTHONPATH=backend $(VENV)/bin/python backend/app/sql_preprocess.py --check
 
 import-all: import-tests
 	@echo "Importing BIRD test cases on top..."
