@@ -134,7 +134,7 @@ different input spellings that mean the same thing reconstruct to the same state
 ### Install
 
 ```bash
-git clone https://github.com/your-org/sqlineage.git
+git clone https://github.com/Clara-zy/sqlineage.git
 cd sqlineage
 
 cp .env.example .env
