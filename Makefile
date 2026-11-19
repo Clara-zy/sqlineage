@@ -32,7 +32,7 @@ db-init:
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/db_init.py
 
 test:
-	env PYTHONPATH=backend $(VENV)/bin/pytest backend/tests/$(ARGS) -v
+	env PYTHONPATH=backend $(VENV)/bin/pytest backend/tests/ $(ARGS) -v
 
 import-tests:
 	@echo "Importing test cases from resource/test_sqls.json..."
@@ -67,7 +67,7 @@ explore:
 	env PYTHONPATH=backend $(VENV)/bin/python backend/app/explore.py $(SQL)
 
 lint:
-	cd backend && $(VENV)/bin/ruff check .
+	$(VENV)/bin/ruff check backend
 	cd frontend && npm run lint
 
 clean:
