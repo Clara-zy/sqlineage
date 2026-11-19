@@ -261,8 +261,10 @@ Contributions that close any of the above are very welcome.
 
 `resource/BIRD_SUBSET/` is a subset of the [BIRD](https://bird-bench.github.io/)
 text-to-SQL benchmark (databases `financial` and `debit_card_specializing`), and is
-redistributed here under **CC BY-SA 4.0**. It includes two SQLite databases (~100 MB
-total); delete `resource/BIRD_SUBSET/dev_databases/` if you only need the SQL examples.
+redistributed here under **CC BY-SA 4.0**. The SQLite database files (~100 MB) are not
+tracked in Git — see `.gitignore`. Download them from the BIRD distribution if you
+want to execute queries against the sample databases; the schema descriptions under
+`dev_databases/*/database_description/` are still included.
 
 ## Contributing
 

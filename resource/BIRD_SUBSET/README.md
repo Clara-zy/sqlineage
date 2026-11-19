@@ -5,6 +5,10 @@
 
 ---
 
+> **注意**：`.sqlite` 数据文件（约 100 MB）未纳入 Git 仓库，
+> `database_description/` 下的表结构说明仍然保留。需要直接查询数据库时，
+> 请从 BIRD 原始数据集获取对应的 `.sqlite` 文件放到原路径。
+
 ## 目录结构
 
 ```
@@ -137,7 +141,7 @@ with open("BIRD_SUBSET/dev.json") as f:
 financial_qs = [q for q in data if q["db_id"] == "financial"]
 debit_qs     = [q for q in data if q["db_id"] == "debit_card_specializing"]
 
-# 访问 SQLite 数据库
+# 访问 SQLite 数据库（需先从 BIRD 下载 financial.sqlite 放到该路径）
 import sqlite3
 
 conn = sqlite3.connect("BIRD_SUBSET/dev_databases/financial/financial.sqlite")
